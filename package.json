@@ -10,6 +10,7 @@
   },
   "bugs": "https://github.com/PLUMSKLO-dev/poe-personal-trade/issues",
   "license": "MIT",
+  "packageManager": "pnpm@11.19.0",
   "main": "dist/main/main.js",
   "type": "commonjs",
   "scripts": {
