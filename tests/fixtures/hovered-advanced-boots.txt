@@ -1,0 +1,29 @@
+Item Class: Boots
+Rarity: Rare
+Rune Trail
+Vaal Greaves
+--------
+Armour: 373 (augmented)
+Intangibility: 8%
+--------
+Requirements:
+Level: 76
+Str: 155
+Dex: 97
+--------
+Sockets: W-R-R W
+--------
+Item Level: 86
+--------
+{ Prefix Modifier "Encased" (Tier: 1) — Defences, Armour }
++131(121-150) to Armour
+{ Prefix Modifier "Hellion's" (Tier: 1) — Speed }
+35% increased Movement Speed
+{ Prefix Modifier "Athlete's" (Tier: 1) — Life }
++123(115-129) to maximum Life
+{ Suffix Modifier "of Bameth" (Tier: 1) — Chaos, Resistance }
++31(31-35)% to Chaos Resistance
+{ Suffix Modifier "of Youth" (Tier: 2) — Life }
+19(18-19)% increased Life Regeneration rate
+{ Suffix Modifier "of the Ice" (Tier: 2) — Elemental, Cold, Resistance }
++44(42-45)% to Cold Resistance

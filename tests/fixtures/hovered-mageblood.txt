@@ -1,0 +1,24 @@
+Item Class: Belts
+Rarity: Unique
+Mageblood
+Heavy Belt
+--------
+Requirements:
+Level: 44
+--------
+Item Level: 86
+--------
+{ Unique Modifier }
++35(25-40) to Dexterity
+{ Unique Modifier }
++38(25-40)% to Fire Resistance
+{ Unique Modifier }
++36(25-40)% to Cold Resistance
+{ Unique Modifier }
+Magic Utility Flasks cannot be Used
+{ Unique Modifier }
+Leftmost 4 Magic Utility Flasks constantly apply their Flask Effects to you
+{ Unique Modifier }
+Magic Utility Flasks applied to you have 25(20-30)% increased Effect
+--------
+They know you will come.

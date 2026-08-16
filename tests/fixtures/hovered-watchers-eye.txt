@@ -1,0 +1,16 @@
+Item Class: Jewels
+Rarity: Unique
+Watcher's Eye
+Prismatic Jewel
+--------
+Limited to: 1
+--------
+Item Level: 86
+--------
+{ Unique Modifier }
+Unaffected by Vulnerability while affected by Determination
+(Debuffs you are Unaffected by can still be placed on you, but will not actually apply their effect)
+--------
+One by one, they stood their ground against a creature they had no hope of understanding, let alone defeating, and one by one, they became a part of it.
+--------
+Place into an allocated Jewel Socket on the Passive Skill Tree. Right click to remove from the Socket.

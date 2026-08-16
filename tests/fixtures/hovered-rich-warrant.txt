@@ -1,0 +1,34 @@
+Item Class: Map Fragments
+Rarity: Normal
+Mercenary Warrant
+--------
+Vorrik, the Azadin Executioner
+--------
+Build: Infamous Bladecaster
+Mercenary Level: 83
+--------
+Clutches of the Damned
+--------
+Bloody Warp
+Faster Casting (Tier: 2)
+Greater Critical Chance (Tier: 3)
+--------
+Bladefall
+Greater Critical Chance (Tier: 3)
+Physical as Extra Chaos (Tier: 2)
+Brutality (Tier: 2)
+Critical Damage (Tier: 2)
+Lesser Spell Cascade (Tier: 1)
+--------
+Seismic Crush
+Greater Brutality (Tier: 3)
+Faster Casting (Tier: 2)
+--------
+Flame Dash
+Faster Casting (Tier: 2)
+More Duration (Tier: 2)
+--------
+Grace
+--------
+Right click this item to view Mercenary details.
+Can be used in a personal Map Device alongside a Map to have this previously fought Mercenary reappear in the area for a rematch.

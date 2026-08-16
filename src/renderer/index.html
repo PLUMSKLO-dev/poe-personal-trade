@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PoE Personal Trade</title>
+  </head>
+  <body>
+    <header class="titlebar">
+      <div>
+        <span class="sigil">PT</span>
+        <strong>PoE Personal Trade</strong>
+        <span class="version">beta 0.23.0</span>
+      </div>
+      <div class="window-actions">
+        <button id="hide-button" title="Hide">–</button>
+        <button id="quit-button" title="Hide overlay">×</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="intro-panel" class="intro panel">
+        <p id="intro-step-one"><strong>1.</strong> Hover over an item.</p>
+        <p id="intro-step-two"><strong>2.</strong> Press <kbd>Alt+D</kbd> to detect and price-check it.</p>
+        <p id="intro-safe" class="safe">No game automation · no account credentials</p>
+      </section>
+
+      <section class="controls panel">
+        <label class="league-control"><span id="league-label">League</span>
+          <select id="league">
+            <option value="Allflame">Allflame</option>
+            <option value="Standard">Standard</option>
+            <option value="Hardcore Allflame">Hardcore Allflame</option>
+          </select>
+        </label>
+        <label class="language-control"><span id="language-label">Language</span>
+          <select id="language">
+            <option value="en">English</option>
+            <option value="de">Deutsch</option>
+          </select>
+        </label>
+        <button id="read-button" class="secondary" title="Read and price-check the copied PoE item">Read item again</button>
+      </section>
+
+      <section id="update-panel" class="update-panel panel hidden" aria-live="polite">
+        <span id="update-status"></span>
+        <button id="update-button" class="mini-button" type="button"></button>
+      </section>
+
+      <section id="empty-state" class="panel empty">
+        No PoE item detected yet.
+      </section>
+
+      <section id="item-panel" class="panel hidden">
+        <div class="item-heading">
+          <div>
+            <div id="item-name" class="item-name"></div>
+            <div id="item-meta" class="muted"></div>
+          </div>
+          <span id="item-badge" class="badge"></span>
+        </div>
+        <div id="item-warnings" class="warnings"></div>
+        <details>
+          <summary id="raw-item-summary">Show copied item text</summary>
+          <pre id="raw-item"></pre>
+        </details>
+        <details id="item-filter-panel" class="item-filter-panel compact-details">
+          <summary><span id="item-options-label">Item search options</span> <span id="item-options-hint">Base type, rarity, item level …</span></summary>
+          <div id="item-filter-list"></div>
+        </details>
+        <div id="modifier-panel" class="modifier-panel hidden">
+          <div class="filter-heading">
+            <h3 id="mod-filter-heading">Mod filters</h3>
+            <span>
+              <button id="mods-all" class="mini-button" type="button">Recommended</button>
+              <button id="mods-none" class="mini-button" type="button">None</button>
+            </span>
+          </div>
+          <div id="modifier-list"></div>
+        </div>
+      </section>
+
+      <section id="mercenary-panel" class="panel hidden">
+        <div class="section-heading">
+          <h2 id="mercenary-heading">Mercenary search</h2>
+          <span id="mercenary-heading-hint">Skills first, supports only to narrow results</span>
+        </div>
+        <div id="detected-mercenary-skills" class="detected-mercenary-skills hidden"></div>
+        <div id="manual-mercenary-filter">
+          <p id="mercenary-instructions" class="muted">For automatic detection: right-click the Warrant, keep its details open and press Alt+D.</p>
+          <label><span id="skill-label">Skill</span>
+            <select id="merc-skill">
+              <option value="">Loading Mercenary catalog …</option>
+            </select>
+          </label>
+          <label class="support-search-label"><span id="support-search-label">Search supports</span>
+            <input id="support-search" type="search" placeholder="e.g. Return, Hypothermia, Chain …" />
+          </label>
+          <div id="support-list" class="support-grid"></div>
+        </div>
+      </section>
+
+      <section id="actions" class="actions panel hidden">
+        <div class="search-action-main">
+          <button id="search-button" class="primary" title="Live price-check the current selection">Price check</button>
+          <span id="selection-summary" class="selection-summary"></span>
+        </div>
+        <span id="search-status" class="search-status" role="status" aria-live="polite"></span>
+      </section>
+
+      <section id="results-panel" class="panel hidden">
+        <div class="results-heading">
+          <h2 id="results-heading-label">Listings</h2>
+          <button id="open-trade-button" class="link-button">Open official search ↗</button>
+        </div>
+        <div id="result-summary" class="summary"></div>
+        <div id="results"></div>
+      </section>
+    </main>
+
+    <footer id="footer-text">
+      This product isn't affiliated with or endorsed by Grinding Gear Games in any way.
+    </footer>
+    <script type="module" src="/renderer.ts"></script>
+  </body>
+</html>

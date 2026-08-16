@@ -1,0 +1,94 @@
+{
+  "name": "poe-personal-trade",
+  "version": "0.23.0",
+  "description": "User-triggered Path of Exile 1 price-check overlay for Windows",
+  "author": "PLUMSKLO-dev",
+  "homepage": "https://github.com/PLUMSKLO-dev/poe-personal-trade#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PLUMSKLO-dev/poe-personal-trade.git"
+  },
+  "bugs": "https://github.com/PLUMSKLO-dev/poe-personal-trade/issues",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --config vite.config.ts\" \"tsc -p tsconfig.main.json --watch\" \"wait-on tcp:5173 dist/main/main.js && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build --config vite.config.ts",
+    "build": "pnpm run typecheck && pnpm run test && pnpm run build:main && pnpm run build:renderer",
+    "package:installer": "pnpm run build && electron-builder --win nsis",
+    "package:portable": "pnpm run build && electron-builder --win portable",
+    "package:all": "pnpm run build && electron-builder --win nsis portable",
+    "package:dir": "pnpm run build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "dev.plumsklo.poe-personal-trade",
+    "productName": "PoE Personal Trade",
+    "directories": {
+      "output": "../../outputs/poe-personal-trade"
+    },
+    "extraResources": [
+      {
+        "from": "THIRD_PARTY_NOTICES.txt",
+        "to": "THIRD_PARTY_NOTICES.txt"
+      },
+      {
+        "from": "assets/poe-copy-helper.exe",
+        "to": "helpers/poe-copy-helper.exe"
+      },
+      {
+        "from": "assets/poe-dismiss-watcher.exe",
+        "to": "helpers/poe-dismiss-watcher.exe"
+      },
+      {
+        "from": "assets/app-icon.png",
+        "to": "app-icon.png"
+      }
+    ],
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/app-icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "PoE-Personal-Trade-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "PoE-Personal-Trade-${version}-portable.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "PLUMSKLO-dev",
+      "repo": "poe-personal-trade",
+      "releaseType": "release"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "concurrently": "^9.2.0",
+    "cross-env": "^10.0.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.1",
+    "vitest": "^3.2.4",
+    "wait-on": "^8.0.4"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

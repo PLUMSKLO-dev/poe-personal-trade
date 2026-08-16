@@ -1,0 +1,18 @@
+Item Class: Body Armours
+Rarity: Rare
+Doom Shelter
+Astral Plate
+--------
+Armour: 711
+--------
+Requirements:
+Level: 62
+Str: 180
+--------
+Sockets: R-R-R-R-R-R
+--------
+Item Level: 83
+--------
++77 to maximum Life
++35% to Fire Resistance
+20% increased Attack Speed

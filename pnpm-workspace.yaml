@@ -1,0 +1,9 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  uiohook-napi: true
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild
