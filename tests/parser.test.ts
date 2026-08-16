@@ -24,6 +24,22 @@ Right click this item to view Mercenary details.`);
     expect(item.mercenaryLevel).toBe(83);
   });
 
+  it("does not apply the incompatible normal rarity filter to map fragments", () => {
+    const item = parsePoeItem(`Item Class: Map Fragments
+Rarity: Normal
+Divination Scarab of Pilfering
+--------
+Stack Size: 1/20`);
+    const payload = makeQuery({
+      league: "Standard",
+      item,
+      itemFilters: { useName: false, useBaseType: true, rarity: "normal" },
+    }) as any;
+
+    expect(payload.query.type).toBe("Divination Scarab of Pilfering");
+    expect(payload.query.filters?.type_filters).toBeUndefined();
+  });
+
   it("parses all skills and tiered supports from the opened warrant details", () => {
     const raw = readFileSync(join(__dirname, "fixtures", "hovered-rich-warrant.txt"), "utf8");
     const item = parsePoeItem(raw);

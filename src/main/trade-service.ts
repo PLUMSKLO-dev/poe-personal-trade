@@ -13,7 +13,7 @@ import type {
 } from "../shared/types";
 import { generatedStatMatchers, statDirections } from "./stat-directions.generated";
 
-const userAgent = "PoePersonalTrade/0.23.0 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
+const userAgent = "PoePersonalTrade/0.23.1 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
 
 const influenceStatIds: Record<ItemInfluence, string> = {
   shaper: "pseudo.pseudo_has_shaper_influence",
@@ -224,7 +224,14 @@ export function makeQuery(request: SearchRequest): Record<string, unknown> {
   }
 
   const typeFilterValues: Record<string, unknown> = {};
-  if (itemFilters?.rarity) typeFilterValues.rarity = { option: itemFilters.rarity };
+  // The Trade index does not expose ordinary Map Fragments (including
+  // Scarabs) as rarity "normal". Sending that visually correct clipboard
+  // rarity turns otherwise valid exact-type searches into zero results.
+  const incompatibleFragmentRarity = itemFilters?.rarity === "normal"
+    && /^(Map Fragments|Kartenfragmente)$/i.test(request.item.itemClass ?? "");
+  if (itemFilters?.rarity && !incompatibleFragmentRarity) {
+    typeFilterValues.rarity = { option: itemFilters.rarity };
+  }
   if (itemFilters?.itemLevel) typeFilterValues.ilvl = rangeValue(itemFilters.itemLevel);
   if (itemFilters?.quality) typeFilterValues.quality = rangeValue(itemFilters.quality);
   if (itemFilters?.sockets) typeFilterValues.sockets = rangeValue(itemFilters.sockets);

@@ -254,8 +254,9 @@ function renderItemFilters(item: ParsedItem): void {
   }
   const rarity = rarityTradeValue(item.rarity);
   if (rarity) {
+    const checked = !(rarity === "normal" && /^(Map Fragments|Kartenfragmente)$/i.test(item.itemClass ?? ""));
     rows.push(`<label class="item-filter-row" data-item-filter="rarity">
-      <input type="checkbox" checked /><span>${t("rarity")}</span>
+      <input type="checkbox" ${checked ? "checked" : ""} /><span>${t("rarity")}</span>
       <select><option value="${rarity}">${escapeHtml(item.rarity ?? rarity)}</option></select>
     </label>`);
   }
