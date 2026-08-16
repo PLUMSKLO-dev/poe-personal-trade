@@ -22,7 +22,7 @@ jobs:
       - run: pnpm run build
       - name: Create the release before parallel artifact uploads
         shell: pwsh
-        run: gh release create $env:GITHUB_REF_NAME --verify-tag --title "PoE Personal Trade $($env:GITHUB_REF_NAME.TrimStart('v'))" --generate-notes
+        run: gh release create $env:GITHUB_REF_NAME --verify-tag --title "PoE Personal Trade $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes "Windows downloads are attached below."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish Windows editions
