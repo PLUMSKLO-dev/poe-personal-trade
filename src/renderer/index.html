@@ -7,14 +7,40 @@
   </head>
   <body>
     <header class="titlebar">
-      <div>
+      <div class="titlebar-brand">
         <span class="sigil">PT</span>
         <strong>PoE Personal Trade</strong>
-        <span class="version">beta 0.23.1</span>
+        <span class="version">beta 0.23.26</span>
       </div>
-      <div class="window-actions">
+      <label class="titlebar-league"><span id="league-label">League</span>
+        <select id="league">
+          <option value="Standard">Standard</option>
+          <option value="Hardcore">Hardcore</option>
+        </select>
+      </label>
+      <div class="titlebar-actions">
+        <details id="settings-menu" class="settings-menu">
+          <summary id="settings-button" aria-label="Settings" title="Settings">⚙</summary>
+          <div class="settings-popover">
+            <strong id="settings-heading">Settings</strong>
+            <div class="settings-fields">
+              <label class="language-control"><span id="language-label">Language</span>
+                <select id="language">
+                  <option value="en">English</option>
+                  <option value="de">Deutsch</option>
+                </select>
+              </label>
+            </div>
+            <section id="update-panel" class="update-panel panel hidden" aria-live="polite">
+              <span id="update-status"></span>
+              <button id="update-button" class="mini-button" type="button"></button>
+            </section>
+          </div>
+        </details>
+        <div class="window-actions">
         <button id="hide-button" title="Hide">–</button>
         <button id="quit-button" title="Hide overlay">×</button>
+        </div>
       </div>
     </header>
 
@@ -25,49 +51,41 @@
         <p id="intro-safe" class="safe">No game automation · no account credentials</p>
       </section>
 
-      <section class="controls panel">
-        <label class="league-control"><span id="league-label">League</span>
-          <select id="league">
-            <option value="Allflame">Allflame</option>
-            <option value="Standard">Standard</option>
-            <option value="Hardcore Allflame">Hardcore Allflame</option>
-          </select>
-        </label>
-        <label class="language-control"><span id="language-label">Language</span>
-          <select id="language">
-            <option value="en">English</option>
-            <option value="de">Deutsch</option>
-          </select>
-        </label>
-        <button id="read-button" class="secondary" title="Read and price-check the copied PoE item">Read item again</button>
-      </section>
-
-      <section id="update-panel" class="update-panel panel hidden" aria-live="polite">
-        <span id="update-status"></span>
-        <button id="update-button" class="mini-button" type="button"></button>
-      </section>
-
       <section id="empty-state" class="panel empty">
         No PoE item detected yet.
       </section>
 
       <section id="item-panel" class="panel hidden">
         <div class="item-heading">
-          <div>
-            <div id="item-name" class="item-name"></div>
+          <div class="item-heading-copy">
+            <div class="item-title-line">
+              <div id="item-name" class="item-name"></div>
+              <button id="read-button" class="item-reread" type="button" title="Read and price-check the copied PoE item" aria-label="Read and price-check the copied PoE item">↻</button>
+              <div class="item-title-actions">
+                <details id="item-filter-panel" class="item-icon-menu">
+                  <summary id="item-options-label" title="Item search options" aria-label="Item search options">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/><circle cx="7" cy="5" r="1.6"/><circle cx="13" cy="10" r="1.6"/><circle cx="8" cy="15" r="1.6"/></svg>
+                    <span id="item-options-label-text" class="sr-only">Item search options</span>
+                  </summary>
+                  <div id="item-filter-panel-popover" class="item-icon-popover item-filter-popover">
+                    <div id="item-options-hint" class="item-options-hint">Base type, rarity, item level …</div>
+                    <div id="item-filter-list"></div>
+                  </div>
+                </details>
+                <details id="raw-item-details" class="item-icon-menu">
+                  <summary id="raw-item-summary" title="Show copied item text" aria-label="Show copied item text">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5.5h8.5A1.5 1.5 0 0 1 17 7v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 16V7a1.5 1.5 0 0 1 1.5-1.5Z"/><path d="M12.5 3.5H5A2 2 0 0 0 3 5.5V14M8 9h5M8 12h5"/></svg>
+                    <span id="raw-item-label" class="sr-only">Show copied item text</span>
+                  </summary>
+                  <div id="raw-item-details-popover" class="item-icon-popover raw-item-popover"><pre id="raw-item"></pre></div>
+                </details>
+              </div>
+            </div>
             <div id="item-meta" class="muted"></div>
           </div>
           <span id="item-badge" class="badge"></span>
         </div>
         <div id="item-warnings" class="warnings"></div>
-        <details>
-          <summary id="raw-item-summary">Show copied item text</summary>
-          <pre id="raw-item"></pre>
-        </details>
-        <details id="item-filter-panel" class="item-filter-panel compact-details">
-          <summary><span id="item-options-label">Item search options</span> <span id="item-options-hint">Base type, rarity, item level …</span></summary>
-          <div id="item-filter-list"></div>
-        </details>
         <div id="modifier-panel" class="modifier-panel hidden">
           <div class="filter-heading">
             <h3 id="mod-filter-heading">Mod filters</h3>

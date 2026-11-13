@@ -23,6 +23,19 @@ internal static class PoeDismissWatcher
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    private static uint ProcessIdForWindow(IntPtr window)
+    {
+        uint processId;
+        GetWindowThreadProcessId(window, out processId);
+        return processId;
+    }
+
     private static readonly int[] MouseButtons = { 0x01, 0x02, 0x04, 0x05, 0x06 };
 
     private static bool AnyMouseButtonDown()
@@ -48,11 +61,19 @@ internal static class PoeDismissWatcher
         if (args.Length != 1 || !ulong.TryParse(args[0], NumberStyles.None,
             CultureInfo.InvariantCulture, out rawHandle)) return 2;
         IntPtr window = new IntPtr(unchecked((long)rawHandle));
+        uint overlayProcessId = ProcessIdForWindow(window);
+        uint gameProcessId = ProcessIdForWindow(GetForegroundWindow());
 
         while (AnyMouseButtonDown()) Thread.Sleep(15);
         foreach (int button in MouseButtons) GetAsyncKeyState(button);
         while (IsWindow(window))
         {
+            IntPtr foreground = GetForegroundWindow();
+            uint foregroundProcessId = ProcessIdForWindow(foreground);
+            if (foregroundProcessId != 0 && foregroundProcessId != gameProcessId
+                && foregroundProcessId != overlayProcessId)
+                return 0;
+
             if (AnyMouseButtonActivity())
             {
                 Point cursor;

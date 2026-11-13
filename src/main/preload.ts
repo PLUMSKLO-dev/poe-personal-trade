@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AppApi, AppSettings, ParsedItem, SearchRequest, UpdateState } from "../shared/types";
+import type { AppApi, AppSettings, LearnedModifierMapping, ModifierKind, ParsedItem, SearchRequest, UpdateState } from "../shared/types";
 
 const api: AppApi = {
   getClipboardItem: () => ipcRenderer.invoke("clipboard:read"),
@@ -8,6 +8,9 @@ const api: AppApi = {
   getMercenaryCatalog: () => ipcRenderer.invoke("trade:mercenary-catalog"),
   getLeagues: () => ipcRenderer.invoke("trade:leagues"),
   matchItemModifiers: (item: ParsedItem) => ipcRenderer.invoke("trade:match-modifiers", item),
+  getTradeStatSuggestions: (lines: string[], kind: ModifierKind) => ipcRenderer.invoke("trade:stat-suggestions", lines, kind),
+  learnModifierMapping: (mapping: Pick<LearnedModifierMapping, "lines" | "kind" | "tradeStatId">) => ipcRenderer.invoke("trade:learn-modifier", mapping),
+  forgetModifierMapping: (mapping: Pick<LearnedModifierMapping, "lines" | "kind">) => ipcRenderer.invoke("trade:forget-modifier", mapping),
   openExternal: (url: string) => ipcRenderer.invoke("external:open", url),
   hideWindow: () => ipcRenderer.invoke("window:hide"),
   quitApp: () => ipcRenderer.invoke("app:quit"),

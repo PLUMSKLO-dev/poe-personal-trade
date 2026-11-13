@@ -15,13 +15,16 @@ import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parsePoeItem } from "./parser";
-import { getMercenaryCatalog, getTradeLeagues, matchItemModifiers, searchTrade } from "./trade-service";
-import type { AppLanguage, AppSettings, ParsedItem, SearchRequest, UpdateState } from "../shared/types";
+import { getMercenaryCatalog, getTradeLeagues, getTradeStatSuggestions, learnedModifierKey, matchItemModifiers, searchTrade } from "./trade-service";
+import type { AppLanguage, AppSettings, LearnedModifierMapping, ModifierKind, ParsedItem, SearchRequest, UpdateState } from "../shared/types";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
-let settings: AppSettings = { league: "Allflame", hotkey: "Alt+D", language: "en" };
+let settings: AppSettings = { league: "Standard", hotkey: "Alt+D", language: "en" };
+let learnedModifierMappings: LearnedModifierMapping[] = [];
+const modifierKinds = new Set<ModifierKind>(["explicit", "implicit", "crafted", "fractured", "enchant", "scourge", "veiled", "imbued", "unknown"]);
+const tradeStatTypes = new Set(["explicit", "implicit", "crafted", "fractured", "enchant", "delve", "scourge", "imbued", "veiled"]);
 let rendererReady = false;
 let pendingItem: ParsedItem | undefined;
 let dismissWatcher: ChildProcess | null = null;
@@ -104,6 +107,39 @@ function loadSettings(): void {
 function persistSettings(): void {
   mkdirSync(app.getPath("userData"), { recursive: true });
   writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), "utf8");
+}
+
+function learnedMappingsPath(): string {
+  return join(app.getPath("userData"), "learned-modifiers.json");
+}
+
+function isLearnedModifierMapping(value: unknown): value is LearnedModifierMapping {
+  if (!value || typeof value !== "object") return false;
+  const mapping = value as Partial<LearnedModifierMapping>;
+  return Array.isArray(mapping.lines)
+    && mapping.lines.length > 0
+    && mapping.lines.length <= 4
+    && mapping.lines.every((line) => typeof line === "string" && line.length > 0 && line.length <= 500)
+    && modifierKinds.has(mapping.kind as ModifierKind)
+    && typeof mapping.tradeStatId === "string"
+    && /^[a-z_]+\.[a-z_0-9]+$/.test(mapping.tradeStatId)
+    && typeof mapping.tradeStatText === "string"
+    && mapping.tradeStatText.length <= 500
+    && typeof mapping.tradeStatType === "string"
+    && tradeStatTypes.has(mapping.tradeStatType)
+    && mapping.tradeStatId.startsWith(`${mapping.tradeStatType}.`);
+}
+
+function loadLearnedMappings(): void {
+  try {
+    const saved = JSON.parse(readFileSync(learnedMappingsPath(), "utf8")) as unknown;
+    learnedModifierMappings = Array.isArray(saved) ? saved.filter(isLearnedModifierMapping).slice(-500) : [];
+  } catch { learnedModifierMappings = []; }
+}
+
+function persistLearnedMappings(): void {
+  mkdirSync(app.getPath("userData"), { recursive: true });
+  writeFileSync(learnedMappingsPath(), JSON.stringify(learnedModifierMappings, null, 2), "utf8");
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -360,7 +396,57 @@ function registerIpc(): void {
     if (!parsed || !Array.isArray(parsed.modifierBlocks) || !Array.isArray(parsed.modifiers)) {
       throw new Error("Ungültige Mod-Liste.");
     }
-    return matchItemModifiers(parsed);
+    return matchItemModifiers(parsed, learnedModifierMappings);
+  });
+  ipcMain.handle("trade:stat-suggestions", (_event, lines: unknown, kind: unknown) => {
+    if (!Array.isArray(lines) || lines.length === 0 || lines.length > 4
+      || !lines.every((line) => typeof line === "string" && line.length > 0 && line.length <= 500)
+      || !modifierKinds.has(kind as ModifierKind)) {
+      throw new Error("Invalid modifier mapping request.");
+    }
+    return getTradeStatSuggestions(lines, kind as ModifierKind);
+  });
+  ipcMain.handle("trade:learn-modifier", async (_event, value: unknown) => {
+    if (!value || typeof value !== "object") throw new Error("Invalid modifier mapping.");
+    const request = value as { lines?: unknown; kind?: unknown; tradeStatId?: unknown };
+    if (!Array.isArray(request.lines) || request.lines.length === 0 || request.lines.length > 4
+      || !request.lines.every((line) => typeof line === "string" && line.length > 0 && line.length <= 500)
+      || !modifierKinds.has(request.kind as ModifierKind)
+      || typeof request.tradeStatId !== "string") {
+      throw new Error("Invalid modifier mapping.");
+    }
+    const lines = request.lines as string[];
+    const kind = request.kind as ModifierKind;
+    const suggestion = (await getTradeStatSuggestions(lines, kind)).find((entry) => entry.id === request.tradeStatId);
+    if (!suggestion) throw new Error("The selected mapping is not an official Trade stat suggestion.");
+    const mapping: LearnedModifierMapping = {
+      lines,
+      kind,
+      tradeStatId: suggestion.id,
+      tradeStatText: suggestion.text,
+      tradeStatType: suggestion.type,
+    };
+    const key = learnedModifierKey(mapping.lines, mapping.kind);
+    learnedModifierMappings = learnedModifierMappings
+      .filter((entry) => learnedModifierKey(entry.lines, entry.kind) !== key)
+      .concat(mapping)
+      .slice(-500);
+    persistLearnedMappings();
+  });
+  ipcMain.handle("trade:forget-modifier", (_event, value: unknown) => {
+    if (!value || typeof value !== "object") throw new Error("Invalid modifier mapping.");
+    const request = value as { lines?: unknown; kind?: unknown };
+    if (!Array.isArray(request.lines) || request.lines.length === 0 || request.lines.length > 4
+      || !request.lines.every((line) => typeof line === "string" && line.length > 0 && line.length <= 500)
+      || !modifierKinds.has(request.kind as ModifierKind)) {
+      throw new Error("Invalid modifier mapping.");
+    }
+    const key = learnedModifierKey(request.lines as string[], request.kind as ModifierKind);
+    const remaining = learnedModifierMappings.filter((entry) => learnedModifierKey(entry.lines, entry.kind) !== key);
+    if (remaining.length !== learnedModifierMappings.length) {
+      learnedModifierMappings = remaining;
+      persistLearnedMappings();
+    }
   });
   ipcMain.handle("external:open", async (_event, url: unknown) => {
     if (typeof url !== "string" || !url.startsWith("https://www.pathofexile.com/trade/search/")) {
@@ -401,6 +487,7 @@ if (!hasSingleInstanceLock) {
   });
   app.whenReady().then(() => {
   loadSettings();
+  loadLearnedMappings();
   app.setAppUserModelId("dev.plumsklo.poe-personal-trade");
   mainWindow = createWindow();
   registerIpc();

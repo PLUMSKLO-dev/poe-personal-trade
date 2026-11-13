@@ -10,10 +10,16 @@ import type {
   ParsedModifierBlock,
   TradeLeague,
   ItemInfluence,
+  ItemSearchFilters,
+  BulkTradeListing,
+  StackValue,
+  LearnedModifierMapping,
+  ModifierKind,
+  TradeStatSuggestion,
 } from "../shared/types";
 import { generatedStatMatchers, statDirections } from "./stat-directions.generated";
 
-const userAgent = "PoePersonalTrade/0.23.1 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
+const userAgent = "PoePersonalTrade/0.23.26 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
 
 const influenceStatIds: Record<ItemInfluence, string> = {
   shaper: "pseudo.pseudo_has_shaper_influence",
@@ -27,12 +33,21 @@ const apiBase = "https://www.pathofexile.com/api/trade";
 
 interface RateState {
   nextAllowedAt: number;
+  blockedUntil: number;
 }
 
-const rateState: RateState = { nextAllowedAt: 0 };
+const rateState: RateState = { nextAllowedAt: 0, blockedUntil: 0 };
+let rateQueue: Promise<void> = Promise.resolve();
 let catalogCache: MercenaryCatalog | undefined;
+let catalogPending: Promise<MercenaryCatalog> | undefined;
 let statEntriesCache: Array<{ id: string; text: string; type: string }> | undefined;
+let statEntriesPending: Promise<Array<{ id: string; text: string; type: string }>> | undefined;
 let leaguesCache: TradeLeague[] | undefined;
+let leaguesCacheExpiresAt = 0;
+let leaguesPending: Promise<TradeLeague[]> | undefined;
+let exchangeStaticCache: Array<{ group: string; id: string; text: string }> | undefined;
+let exchangeStaticCacheExpiresAt = 0;
+let exchangeStaticPending: Promise<Array<{ group: string; id: string; text: string }>> | undefined;
 
 const warrantCacheTtlMs = 5 * 60 * 1_000;
 const warrantCacheMaxEntries = 100;
@@ -97,26 +112,47 @@ function sleep(milliseconds: number): Promise<void> {
 }
 
 async function rateLimitedFetch(url: string, init?: RequestInit): Promise<Response> {
-  const waitFor = rateState.nextAllowedAt - Date.now();
-  if (waitFor > 0) await sleep(waitFor);
-
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": userAgent,
-      ...(init?.headers ?? {}),
-    },
+  // Queue every endpoint request globally. A Promise queue avoids bursts when
+  // independent Mercenary blocks or first-run catalog requests resolve together.
+  const request = rateQueue.then(async () => {
+    const cooldownRemaining = rateState.blockedUntil - Date.now();
+    if (cooldownRemaining > 0) {
+      throw new Error(`GGG-Rate-Limit aktiv. Bitte ${Math.ceil(cooldownRemaining / 1_000)} Sekunden warten.`);
+    }
+    rateState.blockedUntil = 0;
+    const waitFor = rateState.nextAllowedAt - Date.now();
+    if (waitFor > 0) await sleep(waitFor);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": userAgent,
+          ...(init?.headers ?? {}),
+        },
+      });
+    } catch (error) {
+      rateState.nextAllowedAt = Date.now() + 1_000;
+      throw error;
+    }
+    rateState.nextAllowedAt = Date.now() + 1_000;
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("retry-after");
+      const numericSeconds = retryAfter ? Number(retryAfter) : Number.NaN;
+      const retryAt = retryAfter && !Number.isFinite(numericSeconds) ? Date.parse(retryAfter) : Number.NaN;
+      const retrySeconds = Math.max(1, Number.isFinite(numericSeconds)
+        ? numericSeconds
+        : Number.isFinite(retryAt) ? Math.ceil((retryAt - Date.now()) / 1_000) : 10);
+      rateState.blockedUntil = Date.now() + retrySeconds * 1_000;
+      rateState.nextAllowedAt = rateState.blockedUntil;
+      throw new Error(`GGG-Rate-Limit aktiv. Bitte ${retrySeconds} Sekunden warten.`);
+    }
+    return response;
   });
-
-  // Keep short bursts serialized. A server-supplied Retry-After below always wins.
-  rateState.nextAllowedAt = Date.now() + 300;
-  if (response.status === 429) {
-    const retrySeconds = Number.parseInt(response.headers.get("retry-after") ?? "10", 10);
-    rateState.nextAllowedAt = Date.now() + Math.max(retrySeconds, 1) * 1_000;
-    throw new Error(`GGG-Rate-Limit aktiv. Bitte ${Math.max(retrySeconds, 1)} Sekunden warten.`);
-  }
+  rateQueue = request.then(() => undefined, () => undefined);
+  const response = await request;
   if (!response.ok) {
     const detail = await response.text();
     if (response.status === 400 && /query is too complex/i.test(detail)) {
@@ -157,8 +193,13 @@ export function makeQuery(request: SearchRequest): Record<string, unknown> {
     : request.mercenaryFilter ? [request.mercenaryFilter] : [];
   if (mercenaryFilters.length) {
     for (const mercenaryFilter of mercenaryFilters) {
+      const supportCount = mercenaryFilter.supportIds.length;
+      const minimumMatches = supportCount > 1
+        ? supportCount
+        : undefined;
       stats.push({
         type: "mercenary",
+        ...(minimumMatches !== undefined ? { value: { min: minimumMatches } } : {}),
         filters: [
           makeFilter(mercenaryFilter.skillId),
           ...mercenaryFilter.supportIds.map(makeFilter),
@@ -273,6 +314,174 @@ export function makeTradeUrl(request: SearchRequest): string {
   return `https://www.pathofexile.com/trade/search/${encodeURIComponent(request.league)}?q=${query}`;
 }
 
+export function makeBulkExchangeQuery(wantTag: string, haveTags = ["chaos", "divine"]): Record<string, unknown> {
+  return {
+    engine: "new",
+    query: {
+      status: { option: "online" },
+      have: haveTags.filter((tag) => tag !== wantTag),
+      want: [wantTag],
+    },
+    sort: { have: "asc" },
+  };
+}
+
+async function getExchangeStaticItems(): Promise<Array<{ group: string; id: string; text: string }>> {
+  if (exchangeStaticCache && exchangeStaticCacheExpiresAt > Date.now()) return exchangeStaticCache;
+  if (exchangeStaticPending) return exchangeStaticPending;
+  exchangeStaticPending = rateLimitedFetch(`${apiBase}/data/static`).then(async (response) => {
+    const data = (await response.json()) as {
+      result?: Array<{ id?: string; entries?: Array<{ id?: string; text?: string }> }>;
+    };
+    exchangeStaticCache = (data.result ?? []).flatMap((group) =>
+      (group.entries ?? [])
+        .filter((entry): entry is { id: string; text: string } => Boolean(entry.id && entry.text))
+        .map((entry) => ({ group: group.id ?? "", id: entry.id, text: entry.text })),
+    );
+    exchangeStaticCacheExpiresAt = Date.now() + 10 * 60 * 1_000;
+    return exchangeStaticCache;
+  }).finally(() => { exchangeStaticPending = undefined; });
+  return exchangeStaticPending;
+}
+
+function normalizeExchangeName(value: string): string {
+  return value.normalize("NFKC").replace(/[’‘]/g, "'").trim().toLocaleLowerCase("en");
+}
+
+async function getItemExchangeTag(item: ParsedItem): Promise<string | undefined> {
+  const names = [item.baseType, item.name].filter((name): name is string => Boolean(name));
+  if (!names.length) return undefined;
+  const groups = await getExchangeStaticItems();
+  const groupHint = /^(currency)$/i.test(item.itemClass ?? "") ? "Currency"
+    : /^(map fragments)$/i.test(item.itemClass ?? "") ? "Fragments"
+      : /^(divination cards)$/i.test(item.itemClass ?? "") ? "Cards" : undefined;
+  for (const name of names) {
+    const normalized = normalizeExchangeName(name);
+    const matches = groups.filter((entry) => normalizeExchangeName(entry.text) === normalized);
+    const preferred = groupHint ? matches.find((entry) => entry.group === groupHint) : undefined;
+    if (preferred) return preferred.id;
+    if (matches[0]) return matches[0].id;
+  }
+  return undefined;
+}
+
+function median(values: number[]): number | undefined {
+  if (!values.length) return undefined;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+function makeBulkExchangeUrl(league: string, body: Record<string, unknown>): string {
+  const query = encodeURIComponent(JSON.stringify({ exchange: body.query }));
+  return `https://www.pathofexile.com/trade/exchange/${encodeURIComponent(league)}?q=${query}`;
+}
+
+interface ExchangeOfferResponse {
+  id?: string;
+  listing?: {
+    indexed?: string;
+    offers?: Array<{
+      exchange?: { currency?: string; amount?: number };
+      item?: { amount?: number; stock?: number };
+    }>;
+  };
+}
+
+async function searchBulkTrade(request: SearchRequest, exchangeTag: string): Promise<SearchResponse> {
+  const haveTags = exchangeTag === "chaos" ? ["divine"] : ["chaos", "divine"];
+  const body = makeBulkExchangeQuery(exchangeTag, haveTags);
+  const tradeUrl = makeBulkExchangeUrl(request.league, body);
+
+  // Chaos Orb is the reference currency itself: there is no useful exchange
+  // orderbook for exchanging chaos into chaos, but its stack value is exact.
+  if (exchangeTag === "chaos") {
+    const quantity = request.item.stackSize ?? 1;
+    const maxStackSize = request.item.maxStackSize ?? quantity;
+    const stackValue: StackValue = {
+      quantity, maxStackSize, unitPrice: 1, currency: "chaos",
+      currentTotal: quantity, fullStackTotal: maxStackSize, basisListings: 0,
+    };
+    return {
+      queryId: "fixed-chaos-ratio",
+      total: 0,
+      tradeUrl,
+      results: [],
+      bulkListings: [],
+      stackValue,
+      notice: "Chaos Orb is valued at its exact 1:1 reference rate.",
+    };
+  }
+
+  const response = await rateLimitedFetch(
+    `${apiBase}/exchange/${encodeURIComponent(request.league)}`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  const data = (await response.json()) as {
+    id?: string;
+    total?: number;
+    result?: Record<string, ExchangeOfferResponse>;
+    error?: { message?: string };
+  };
+  if (data.error?.message) throw new Error(`Trade-Anfrage fehlgeschlagen: ${data.error.message}`);
+
+  const listings: BulkTradeListing[] = Object.values(data.result ?? {}).flatMap((entry) =>
+    (entry.listing?.offers ?? []).flatMap((offer) => {
+      const exchangeAmount = Number(offer.exchange?.amount);
+      const itemAmount = Number(offer.item?.amount);
+      const exchangeCurrency = String(offer.exchange?.currency ?? "");
+      const stock = Number(offer.item?.stock);
+      if (!exchangeCurrency || !Number.isFinite(exchangeAmount) || exchangeAmount <= 0
+        || !Number.isFinite(itemAmount) || itemAmount <= 0
+        || !Number.isFinite(stock) || stock <= 0) return [];
+      return [{
+        id: String(entry.id ?? ""),
+        exchangeAmount,
+        exchangeCurrency,
+        itemAmount,
+        stock,
+        fulfill: Math.floor(stock / itemAmount),
+        ...(entry.listing?.indexed ? { indexed: entry.listing.indexed } : {}),
+      }];
+    }),
+  ).filter((entry) => Boolean(entry.id))
+    .sort((left, right) => left.exchangeCurrency.localeCompare(right.exchangeCurrency)
+      || (left.exchangeAmount / left.itemAmount) - (right.exchangeAmount / right.itemAmount));
+
+  const chaosRates = listings
+    .filter((listing) => listing.exchangeCurrency === "chaos")
+    .map((listing) => listing.exchangeAmount / listing.itemAmount);
+  const chosenCurrency = chaosRates.length ? "chaos" : listings[0]?.exchangeCurrency;
+  const chosenRates = chosenCurrency
+    ? listings.filter((listing) => listing.exchangeCurrency === chosenCurrency)
+      .slice(0, 10).map((listing) => listing.exchangeAmount / listing.itemAmount)
+    : [];
+  const unitPrice = median(chosenRates);
+  const quantity = request.item.stackSize ?? 1;
+  const maxStackSize = request.item.maxStackSize ?? quantity;
+  const stackValue = unitPrice !== undefined ? {
+    quantity,
+    maxStackSize,
+    unitPrice,
+    currency: chosenCurrency!,
+    currentTotal: unitPrice * quantity,
+    fullStackTotal: unitPrice * maxStackSize,
+    basisListings: chosenRates.length,
+  } satisfies StackValue : undefined;
+
+  return {
+    queryId: String(data.id ?? "bulk-exchange"),
+    total: Number(data.total ?? listings.length),
+    tradeUrl,
+    results: [],
+    bulkListings: listings.slice(0, 20),
+    ...(stackValue ? { stackValue } : {}),
+    notice: stackValue
+      ? `Stack value is estimated from the median rate of ${chosenRates.length} current ${chosenCurrency} exchange offers.`
+      : "No current exchange offers were available to estimate this stack value.",
+  };
+}
+
 async function requestTradeSearch(league: string, body: Record<string, unknown>): Promise<TradeSearchData> {
   const response = await rateLimitedFetch(
     `${apiBase}/search/${encodeURIComponent(league)}`,
@@ -342,6 +551,7 @@ export function clearWarrantMemoryCache(): void {
   pendingWarrantSearches.clear();
   pendingWarrantOffers.clear();
   rateState.nextAllowedAt = 0;
+  rateState.blockedUntil = 0;
 }
 
 interface MercenaryBlockSearch {
@@ -420,12 +630,19 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
   if (!/^[A-Za-z0-9 _-]{1,80}$/.test(request.league)) {
     throw new Error("Ungültiger Liga-Name.");
   }
-  const resolvedRequest = request;
+  let resolvedRequest = request;
   const mercenaryFilters = resolvedRequest.mercenaryFilters?.length
     ? resolvedRequest.mercenaryFilters
     : resolvedRequest.mercenaryFilter ? [resolvedRequest.mercenaryFilter] : [];
+  const hasSelectedItemStats = Boolean(request.statFilters?.length || request.statIds?.length);
+  if (!request.item.isMercenaryWarrant && !mercenaryFilters.length && !hasSelectedItemStats
+    && request.item.stackSize !== undefined) {
+    const exchangeTag = await getItemExchangeTag(request.item);
+    if (exchangeTag) return searchBulkTrade(request, exchangeTag);
+  }
   let searchData: TradeSearchData;
   let intersectionNotice: string | undefined;
+  let baseTypeFallbackNotice: string | undefined;
   let partitionedSupports = false;
 
   if (mercenaryFilters.length > 1) {
@@ -459,7 +676,28 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
     searchData = blockSearch.data;
     partitionedSupports = blockSearch.partitioned;
   } else {
-    searchData = await requestTradeSearch(request.league, makeQuery(resolvedRequest));
+    try {
+      searchData = await requestTradeSearch(request.league, makeQuery(resolvedRequest));
+    } catch (error) {
+      const selectedStatCount = (request.statFilters?.length ?? request.statIds?.length ?? 0);
+      const useBaseType = request.itemFilters?.useBaseType ?? true;
+      if (!(error instanceof Error)
+        || !/Unknown item base type/i.test(error.message)
+        || !request.item.baseType
+        || !useBaseType
+        || selectedStatCount === 0) throw error;
+
+      // Some magic-item clipboard headers include both affixes and the base
+      // type. If the exact type is rejected, retry once without that one filter
+      // while preserving rarity, selected stats, and the remaining options.
+      const itemFilters: ItemSearchFilters = {
+        ...(request.itemFilters ?? { useName: true, useBaseType: true }),
+        useBaseType: false,
+      };
+      resolvedRequest = { ...request, itemFilters };
+      searchData = await requestTradeSearch(request.league, makeQuery(resolvedRequest));
+      baseTypeFallbackNotice = "PoE hat den kopierten Basistyp abgelehnt. Die Suche wurde ohne diesen einzelnen Filter wiederholt; bitte prüfe, ob die Treffer zum Item passen.";
+    }
   }
 
   if (searchData.total === 0
@@ -484,6 +722,9 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
       ? "Der komplexe Support-Block wurde automatisch aufgeteilt und lokal exakt ausgewertet. Maximal zehn sichtbare Vergleichsangebote werden geladen."
       : "Nur manuell ausgelöste Suche; maximal zehn sichtbare Vergleichsangebote werden geladen.";
 
+  const localizedSearchNotice = baseTypeFallbackNotice
+    ? `${baseTypeFallbackNotice} ${searchNotice}`
+    : searchNotice;
   return {
     queryId: searchData.id,
     total: searchData.total,
@@ -491,50 +732,105 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
     results,
     notice: request.item.isMercenaryWarrant
       ? `${searchNotice} Identische Warrant-Abfragen werden fünf Minuten lang nur im Arbeitsspeicher wiederverwendet.`
-      : searchNotice,
+      : localizedSearchNotice,
   };
 }
 
 export async function getMercenaryCatalog(): Promise<MercenaryCatalog> {
   if (catalogCache) return catalogCache;
-  const entries = await getStatEntries();
-  const unique = (prefix: string) => {
-    const byId = new Map<string, string>();
-    for (const entry of entries) {
-      if (entry.type !== "mercenary" || !entry.id.startsWith(prefix)) continue;
-      byId.set(entry.id, entry.text);
-    }
-    return Array.from(byId, ([id, name]) => ({ id, name }))
-      .sort((left, right) => left.name.localeCompare(right.name, "en"));
-  };
-  catalogCache = {
-    skills: unique("mercenary.skill_"),
-    supports: unique("mercenary.support_"),
-  };
-  return catalogCache;
+  if (catalogPending) return catalogPending;
+  catalogPending = getStatEntries().then((entries) => {
+    const unique = (prefix: string) => {
+      const byId = new Map<string, string>();
+      for (const entry of entries) {
+        if (entry.type !== "mercenary" || !entry.id.startsWith(prefix)) continue;
+        byId.set(entry.id, entry.text);
+      }
+      return Array.from(byId, ([id, name]) => ({ id, name }))
+        .sort((left, right) => left.name.localeCompare(right.name, "en"));
+    };
+    catalogCache = {
+      skills: unique("mercenary.skill_"),
+      supports: unique("mercenary.support_"),
+    };
+    return catalogCache;
+  }).finally(() => { catalogPending = undefined; });
+  return catalogPending;
 }
 
 export async function getTradeLeagues(): Promise<TradeLeague[]> {
-  if (leaguesCache) return leaguesCache;
-  const response = await rateLimitedFetch(`${apiBase}/data/leagues`);
-  const data = (await response.json()) as { result?: Array<{ id?: string; text?: string }> };
-  const entries = (data.result ?? [])
-    .filter((entry): entry is { id: string; text: string } => Boolean(entry.id && entry.text))
-    .map((entry) => ({ id: entry.id, text: entry.text }));
-  leaguesCache = Array.from(new Map(entries.map((entry) => [entry.id, entry])).values());
-  return leaguesCache;
+  if (leaguesCache && leaguesCacheExpiresAt > Date.now()) return leaguesCache;
+  if (leaguesPending) return leaguesPending;
+  leaguesPending = rateLimitedFetch(`${apiBase}/data/leagues`).then(async (response) => {
+    const data = (await response.json()) as { result?: Array<{ id?: string; text?: string; realm?: string }> };
+    const entries = (data.result ?? [])
+      .filter((entry) => !entry.realm || entry.realm === "pc")
+      .filter((entry): entry is { id: string; text: string } => Boolean(entry.id && entry.text))
+      .map((entry) => ({ id: entry.id, text: entry.text }));
+    if (!entries.length) return leaguesCache ?? [];
+    leaguesCache = Array.from(new Map(entries.map((entry) => [entry.id, entry])).values());
+    leaguesCacheExpiresAt = Date.now() + 60_000;
+    return leaguesCache;
+  }).finally(() => { leaguesPending = undefined; });
+  return leaguesPending;
 }
 
 async function getStatEntries(): Promise<Array<{ id: string; text: string; type: string }>> {
   if (statEntriesCache) return statEntriesCache;
-  const response = await rateLimitedFetch(`${apiBase}/data/stats`);
-  const data = (await response.json()) as {
-    result?: Array<{ entries?: Array<{ id?: string; text?: string; type?: string }> }>;
-  };
-  statEntriesCache = (data.result ?? [])
-    .flatMap((group) => group.entries ?? [])
-    .filter((entry): entry is { id: string; text: string; type: string } => Boolean(entry.id && entry.text && entry.type));
-  return statEntriesCache;
+  if (statEntriesPending) return statEntriesPending;
+  statEntriesPending = rateLimitedFetch(`${apiBase}/data/stats`).then(async (response) => {
+    const data = (await response.json()) as {
+      result?: Array<{ entries?: Array<{ id?: string; text?: string; type?: string }> }>;
+    };
+    statEntriesCache = (data.result ?? [])
+      .flatMap((group) => group.entries ?? [])
+      .filter((entry): entry is { id: string; text: string; type: string } => Boolean(entry.id && entry.text && entry.type));
+    return statEntriesCache;
+  }).finally(() => { statEntriesPending = undefined; });
+  return statEntriesPending;
+}
+
+const searchableStatTypes = new Set([
+  "explicit", "implicit", "crafted", "fractured", "enchant", "delve", "scourge", "imbued", "veiled",
+]);
+const suggestionStopWords = new Set([
+  "the", "and", "with", "from", "your", "you", "when", "while", "for", "per", "to", "of", "on", "in",
+  "is", "are", "have", "has", "this", "that", "during", "against", "affected", "increased", "reduced",
+]);
+
+function wordsForSuggestion(value: string): Set<string> {
+  return new Set(value.toLocaleLowerCase("en")
+    .replace(/[-+]?\d+(?:[.,]\d+)?/g, " ")
+    .replace(/[^a-z]+/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 3 && !suggestionStopWords.has(word)));
+}
+
+export async function getTradeStatSuggestions(lines: string[], kind: ModifierKind): Promise<TradeStatSuggestion[]> {
+  const source = wordsForSuggestion(lines.join(" "));
+  if (!source.size) return [];
+  const entries = (await getStatEntries()).filter((entry) => searchableStatTypes.has(entry.type)
+    && (kind === "unknown" || entry.type === kind));
+  return entries.map((entry) => {
+    const words = wordsForSuggestion(entry.text);
+    let overlap = 0;
+    for (const word of source) if (words.has(word)) overlap += 1;
+    const score = overlap / Math.sqrt(source.size * Math.max(words.size, 1));
+    return { entry, score };
+  }).filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score || left.entry.text.localeCompare(right.entry.text, "en"))
+    .slice(0, 12)
+    .map(({ entry }) => ({ id: entry.id, text: entry.text, type: entry.type }));
+}
+
+export function learnedModifierKey(lines: string[], kind: ModifierKind): string {
+  const template = lines.map((line) => normalizeModifierText(line)
+    .replace(/[-+]?\d+(?:[.,]\d+)?/g, "#")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("en"))
+    .join("\n");
+  return `${kind}\n${template}`;
 }
 
 function statPattern(template: string): RegExp {
@@ -552,6 +848,8 @@ export function normalizeModifierText(raw: string): string {
     // Advanced item descriptions insert the affix roll after the current value:
     // +131(121-150) to Armour -> +131 to Armour.
     .replace(/([-+]?\d+(?:[.,]\d+)?)\([-+]?\d+(?:[.,]\d+)?-[-+]?\d+(?:[.,]\d+)?\)/g, "$1")
+    // PoE appends this explanatory label to some fixed-value unique modifiers.
+    .replace(/\s+[—–-]\s+Unscalable Value$/i, "")
     .replace(/\s+\((implicit|crafted|fractured|enchant|delve|scourge|imbued|veiled)\)$/i, "")
     .trim();
 }
@@ -560,28 +858,101 @@ function stripTradeIdPrefix(id: string): string {
   return id.startsWith("{") ? id.slice(id.indexOf("}") + 1) : id;
 }
 
+interface IndexedGeneratedMatcher {
+  matcher: typeof generatedStatMatchers[number];
+  index: number;
+}
+
+let generatedMatcherIndex: Map<string, IndexedGeneratedMatcher[]> | undefined;
+const generatedMatcherPatterns = new WeakMap<typeof generatedStatMatchers[number], RegExp>();
+
+function firstWord(value: string): string {
+  return value.match(/[a-z][a-z'’]*/i)?.[0]?.toLocaleLowerCase("en") ?? "";
+}
+
+function generatedMatcherKey(lineCount: number, kind: string, word: string): string {
+  return `${lineCount}\n${kind}\n${word}`;
+}
+
+function getGeneratedMatcherIndex(): Map<string, IndexedGeneratedMatcher[]> {
+  if (generatedMatcherIndex) return generatedMatcherIndex;
+  const index = new Map<string, IndexedGeneratedMatcher[]>();
+  generatedStatMatchers.forEach((matcher, sourceIndex) => {
+    const lineCount = matcher.template.trim().split("\n").length;
+    const word = firstWord(matcher.template);
+    for (const [kind, ids] of Object.entries(matcher.tradeIds)) {
+      if (!ids.length) continue;
+      const key = generatedMatcherKey(lineCount, kind, word);
+      const candidates = index.get(key) ?? [];
+      candidates.push({ matcher, index: sourceIndex });
+      index.set(key, candidates);
+    }
+  });
+  generatedMatcherIndex = index;
+  return index;
+}
+
+function generatedMatcherPattern(matcher: typeof generatedStatMatchers[number]): RegExp {
+  let pattern = generatedMatcherPatterns.get(matcher);
+  if (!pattern) {
+    pattern = statPattern(matcher.template.trim());
+    generatedMatcherPatterns.set(matcher, pattern);
+  }
+  return pattern;
+}
+
 function matchBlock(
   block: ParsedModifierBlock,
   entries: Array<{ id: string; text: string; type: string }>,
-): { entry: { id: string; text: string; type: string }; numericValue?: number; alternativeIds?: string[]; better?: -1 | 0 | 1 } | undefined {
+  learnedMappings: Map<string, LearnedModifierMapping> = new Map(),
+): { entry: { id: string; text: string; type: string }; numericValue?: number; alternativeIds?: string[]; better?: -1 | 0 | 1; learned?: true } | undefined {
   const normalizedLines = block.lines.map(normalizeModifierText);
-  const text = normalizedLines.join("\n");
+  const textVariants = [
+    normalizedLines.join("\n"),
+    normalizedLines.flatMap((line) => line.split(/\s+\/\s+/)).join("\n"),
+  ];
+  const lineCounts = new Set(textVariants.map((text) => text.split("\n").length));
   const exactType = block.kind === "unknown" ? undefined : block.kind;
   const kindOrder = exactType ? [exactType] : ["explicit", "implicit", "crafted", "fractured", "enchant", "delve", "scourge", "imbued", "veiled"];
-  const generated = generatedStatMatchers.find((matcher) => {
-    if (matcher.template.trim().split("\n").length !== normalizedLines.length) return false;
-    if (!kindOrder.some((kind) => matcher.tradeIds[kind]?.length)) return false;
-    return statPattern(matcher.template.trim()).test(text);
-  });
+  const learnedMapping = learnedMappings.get(learnedModifierKey(block.lines, block.kind));
+  // A learned entry is explicitly confirmed by the user and keyed to the
+  // normalized source wording, so it can bridge spelling/format differences
+  // that prevented an exact official-template match in the first place.
+  const appliesLearnedMapping = Boolean(learnedMapping);
+  let generated: typeof generatedStatMatchers[number] | undefined;
+  if (!appliesLearnedMapping) {
+    // Generated matcher data is several megabytes. Index it once by the shape
+    // that can be known without regex work, then test only candidates with the
+    // same line count, modifier type and first word. Keep source order so an
+    // ambiguous legacy match resolves exactly as it did before this index.
+    const matcherIndex = getGeneratedMatcherIndex();
+    const candidateByIndex = new Map<number, typeof generatedStatMatchers[number]>();
+    for (const text of textVariants) {
+      const lineCount = text.split("\n").length;
+      const word = firstWord(text);
+      for (const kind of kindOrder) {
+        for (const candidate of matcherIndex.get(generatedMatcherKey(lineCount, kind, word)) ?? []) {
+          candidateByIndex.set(candidate.index, candidate.matcher);
+        }
+      }
+    }
+    generated = Array.from(candidateByIndex.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([, matcher]) => matcher)
+      .find((matcher) => textVariants.some((text) => generatedMatcherPattern(matcher).test(text)));
+  }
   const generatedKind = generated && kindOrder.find((kind) => generated.tradeIds[kind]?.length);
   const generatedIds = generated && generatedKind
     ? generated.tradeIds[generatedKind]!.map(stripTradeIdPrefix)
     : [];
-  const candidates = entries.filter((entry) => entry.text.split("\n").length === normalizedLines.length);
-  const entry = generatedIds.length
-    ? entries.find((candidate) => candidate.id === generatedIds[0]) ?? { id: generatedIds[0]!, text: generated!.template.trim(), type: generatedKind! }
-    : candidates.find((candidate) => candidate.type === exactType && statPattern(candidate.text).test(text))
-      ?? candidates.find((candidate) => statPattern(candidate.text).test(text));
+  const candidates = entries.filter((entry) => lineCounts.has(entry.text.split("\n").length));
+  const entry = appliesLearnedMapping && learnedMapping
+    ? entries.find((candidate) => candidate.id === learnedMapping.tradeStatId)
+      ?? { id: learnedMapping.tradeStatId, text: learnedMapping.tradeStatText, type: learnedMapping.tradeStatType }
+    : generatedIds.length
+      ? entries.find((candidate) => candidate.id === generatedIds[0]) ?? { id: generatedIds[0]!, text: generated!.template.trim(), type: generatedKind! }
+      : candidates.find((candidate) => candidate.type === exactType && textVariants.some((text) => statPattern(candidate.text).test(text)))
+        ?? candidates.find((candidate) => textVariants.some((text) => statPattern(candidate.text).test(text)));
   if (!entry) return undefined;
   const numericValues = Array.from(normalizedLines.join(" ").matchAll(/[-+]?\d+(?:[.,]\d+)?/g), (match) =>
     Number.parseFloat(match[0].replace(",", ".")),
@@ -597,7 +968,30 @@ function matchBlock(
     ...(typeof numericValue === "number" && Number.isFinite(numericValue) ? { numericValue } : {}),
     ...(generatedIds.length > 1 ? { alternativeIds: generatedIds.slice(1) } : {}),
     ...(generated ? { better: generated.better } : {}),
+    ...(appliesLearnedMapping ? { learned: true as const } : {}),
   };
+}
+
+function rollsForModifierLine(line: string): ParsedModifierBlock["rolls"] {
+  const normalized = line.replace(/([-+]?\d+(?:[.,]\d+)?)\(([-+]?\d+(?:[.,]\d+)?)-([-+]?\d+(?:[.,]\d+)?)\)/g, "$1{$2:$3}");
+  return Array.from(normalized.matchAll(/([-+]?\d+(?:[.,]\d+)?)(?:\{([-+]?\d+(?:[.,]\d+)?):([-+]?\d+(?:[.,]\d+)?)\})?/g), (match) => ({
+    value: Number.parseFloat(match[1]!.replace(",", ".")),
+    ...(match[2] !== undefined ? { min: Number.parseFloat(match[2].replace(",", ".")) } : {}),
+    ...(match[3] !== undefined ? { max: Number.parseFloat(match[3].replace(",", ".")) } : {}),
+  }));
+}
+
+function splitBundledModifier(block: ParsedModifierBlock, entries: Array<{ id: string; text: string; type: string }>): ParsedModifierBlock[] {
+  if (!block.lines.length || matchBlock(block, entries)) return [block];
+  // Advanced item text can put multiple official stats under one affix header
+  // as separate lines, while compact item text joins them with " / ". Handle
+  // both shapes, but split only if every part independently maps to a stat.
+  const segments = block.lines.flatMap((line) => line.split(/\s+\/\s+/)).map((line) => line.trim()).filter(Boolean);
+  if (segments.length < 2) return [block];
+  const splitBlocks = segments.map((line) => ({ ...block, lines: [line], rolls: rollsForModifierLine(line) }));
+  // Split only when each side independently maps to an official stat. This
+  // keeps literal slashes in legitimate single modifiers from being changed.
+  return splitBlocks.every((candidate) => matchBlock(candidate, entries)) ? splitBlocks : [block];
 }
 
 function pseudoValues(blocks: ParsedModifierBlock[]): Map<string, number> {
@@ -655,7 +1049,13 @@ function createPseudoMatches(
   return definitions.flatMap(([key, label, conflictKeys]) => {
     const value = totals.get(key);
     if (!value) return [];
-    const entry = entries.find((candidate) => candidate.type === "pseudo" && candidate.text.toLocaleLowerCase() === label.toLocaleLowerCase());
+    const bundled = generatedStatMatchers.find((matcher) =>
+      matcher.template.trim().toLocaleLowerCase() === label.toLocaleLowerCase()
+      && matcher.tradeIds.pseudo?.length,
+    );
+    const bundledId = bundled?.tradeIds.pseudo?.[0];
+    const entry = entries.find((candidate) => candidate.type === "pseudo" && candidate.text.toLocaleLowerCase() === label.toLocaleLowerCase())
+      ?? (bundledId ? { id: stripTradeIdPrefix(bundledId), text: label, type: "pseudo" } : undefined);
     if (!entry) return [];
     return [{
       id: entry.id,
@@ -671,36 +1071,18 @@ function createPseudoMatches(
   });
 }
 
-function directConflictKeys(text: string): string[] {
-  const keys: string[] = [];
-  if (/maximum Life/i.test(text)) keys.push("life");
-  if (/maximum Mana/i.test(text)) keys.push("mana");
-  for (const element of ["fire", "cold", "lightning", "chaos"]) {
-    const allElemental = element !== "chaos" && /all Elemental Resistances/i.test(text);
-    if (/Resistance/i.test(text) && (new RegExp(`\\b${element}\\b`, "i").test(text) || allElemental || /All Resistances/i.test(text))) {
-      keys.push(`res:${element}`);
-    }
-  }
-  for (const attribute of ["strength", "dexterity", "intelligence"]) {
-    if (new RegExp(attribute, "i").test(text) || /all Attributes/i.test(text)) keys.push(`attr:${attribute}`);
-  }
-  return keys;
-}
-
-export async function matchItemModifiers(item: ParsedItem | string[]): Promise<TradeStatMatch[]> {
-  const entries = (await getStatEntries()).filter((entry) =>
-    ["explicit", "implicit", "crafted", "fractured", "enchant", "delve", "scourge", "imbued", "veiled", "pseudo"].includes(entry.type),
-  );
-  const blocks: ParsedModifierBlock[] = Array.isArray(item)
-    ? item.map((line) => ({ lines: [line], kind: "unknown", tags: [], rolls: [] }))
-    : item.modifierBlocks;
+function matchModifierBlocks(
+  blocks: ParsedModifierBlock[],
+  searchableEntries: Array<{ id: string; text: string; type: string }>,
+  recommendAll: boolean,
+  learnedMappings: Map<string, LearnedModifierMapping>,
+): TradeStatMatch[] {
   const direct: TradeStatMatch[] = [];
-  const searchableEntries = entries.filter((entry) => entry.type !== "pseudo");
   const consumed = new Set<number>();
   for (const [index, originalBlock] of blocks.slice(0, 80).entries()) {
     if (consumed.has(index)) continue;
     let block = originalBlock;
-    let matched = matchBlock(block, searchableEntries);
+    let matched = matchBlock(block, searchableEntries, learnedMappings);
     if (!matched && block.lines.length === 1) {
       for (let count = 2; count <= 3 && index + count <= blocks.length; count += 1) {
         const group = blocks.slice(index, index + count);
@@ -710,7 +1092,7 @@ export async function matchItemModifiers(item: ParsedItem | string[]): Promise<T
           lines: group.flatMap((candidate) => candidate.lines),
           rolls: group.flatMap((candidate) => candidate.rolls),
         };
-        const combinedMatch = matchBlock(combined, searchableEntries);
+        const combinedMatch = matchBlock(combined, searchableEntries, learnedMappings);
         if (combinedMatch) {
           block = combined;
           matched = combinedMatch;
@@ -748,12 +1130,36 @@ export async function matchItemModifiers(item: ParsedItem | string[]): Promise<T
       ...(roll?.max !== undefined ? { rollMax: roll.max } : {}),
       better: matched.better ?? statDirections[matched.entry.id]?.better ?? 1,
       ...(matched.alternativeIds?.length ? { alternativeIds: matched.alternativeIds } : {}),
-      conflictKeys: directConflictKeys(matched.entry.text),
-      recommended: !Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique"
-        ? true
-        : /Movement Speed/i.test(matched.entry.text),
+      ...(matched.learned ? { learned: true } : {}),
+      recommended: recommendAll || /Movement Speed/i.test(matched.entry.text),
     });
   }
+  return direct;
+}
+
+export async function matchItemModifiers(item: ParsedItem | string[], learnedMappings: LearnedModifierMapping[] = []): Promise<TradeStatMatch[]> {
+  const learnedByKey = new Map(learnedMappings.map((mapping) => [
+    learnedModifierKey(mapping.lines, mapping.kind), mapping,
+  ]));
+  const sourceBlocks: ParsedModifierBlock[] = Array.isArray(item)
+    ? item.map((line) => ({ lines: [line], kind: "unknown", tags: [], rolls: [] }))
+    : item.modifierBlocks;
+  let searchableEntries: Array<{ id: string; text: string; type: string }> = [];
+  let blocks = sourceBlocks.flatMap((block) => splitBundledModifier(block, searchableEntries));
+  const recommendAll = !Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique";
+  let direct = matchModifierBlocks(blocks, searchableEntries, recommendAll, learnedByKey);
+
+  // Most current stats resolve from the bundled Awakened stat catalog. Fetch
+  // GGG's live stat list only when that local catalog cannot map a modifier.
+  if (direct.some((match) => match.unmatched)) {
+    const entries = (await getStatEntries()).filter((entry) =>
+      ["explicit", "implicit", "crafted", "fractured", "enchant", "delve", "scourge", "imbued", "veiled", "pseudo"].includes(entry.type),
+    );
+    searchableEntries = entries.filter((entry) => entry.type !== "pseudo");
+    blocks = sourceBlocks.flatMap((block) => splitBundledModifier(block, searchableEntries));
+    direct = matchModifierBlocks(blocks, searchableEntries, recommendAll, learnedByKey);
+  }
+  const entries = searchableEntries;
   const pseudos = createPseudoMatches(blocks, entries);
   if (!Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique") {
     for (const pseudo of pseudos) pseudo.recommended = false;

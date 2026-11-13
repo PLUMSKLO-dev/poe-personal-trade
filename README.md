@@ -21,6 +21,7 @@ Windows SmartScreen may warn about early beta builds because the project does no
 - Matches selectable item properties and official Trade stat filters.
 - Detects Mercenary Warrant skills and supports from the right-click detail view.
 - Retrieves live listings rather than storing a price database.
+- Lets you explicitly confirm and locally save a missing modifier-to-Trade-stat mapping; learned mappings are never uploaded.
 - Keeps running in the tray when the overlay is hidden.
 - Replaces the visible price check when `Alt+D` is used on another item.
 

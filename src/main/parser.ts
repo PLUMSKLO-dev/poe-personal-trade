@@ -26,6 +26,25 @@ function modifierKind(text: string): ModifierKind {
   return "explicit";
 }
 
+function baseTypeFromMagicName(itemName: string, textLines: string[]): string | undefined {
+  let candidate = itemName;
+  let removedAffix = false;
+  for (const line of textLines) {
+    const header = advancedHeader.exec(line);
+    if (!header?.[2]) continue;
+    const descriptor = header[1] ?? "";
+    const affix = header[2].trim();
+    if (/prefix|präfix/i.test(descriptor) && candidate.toLocaleLowerCase().startsWith(`${affix} `.toLocaleLowerCase())) {
+      candidate = candidate.slice(affix.length).trim();
+      removedAffix = true;
+    } else if (/suffix/i.test(descriptor) && candidate.toLocaleLowerCase().endsWith(` ${affix}`.toLocaleLowerCase())) {
+      candidate = candidate.slice(0, -(affix.length + 1)).trim();
+      removedAffix = true;
+    }
+  }
+  return removedAffix && candidate ? candidate : undefined;
+}
+
 function parseRolls(line: string): ModifierRoll[] {
   const normalized = line.replace(/([-+]?\d+(?:[.,]\d+)?)\(([-+]?\d+(?:[.,]\d+)?)-([-+]?\d+(?:[.,]\d+)?)\)/g, (_all, value, min, max) =>
     `${value}{${min}:${max}}`,
@@ -47,8 +66,10 @@ function isModifierLine(line: string, name?: string, baseType?: string): boolean
   if (!line || separator.test(line) || line === name || line === baseType) return false;
   // Reminder text explains a modifier but is not part of the searchable stat.
   if (/^\(.+\)$/.test(line)) return false;
-  if (/^(Right click|Rechtsklick|Can be used|Kann zusammen)/i.test(line)) return false;
-  if (/^(Item Class|Gegenstandsklasse|Rarity|Seltenheit|Item Level|Gegenstandsstufe|Note|Notiz|Quality|Qualität|Sockets|Fassungen|Requirements?|Anforderungen|Level|Str|Dex|Int|Armour|Evasion Rating|Energy Shield|Ward|Intangibility):/i.test(line)) return false;
+  // Stackable items expose interaction hints in the copied text. They are UI
+  // instructions, not modifiers, so never show them as unmatched trade stats.
+  if (/^(Right click|Rechtsklick|Shift click|Shift-click|Can be used|Kann zusammen)/i.test(line)) return false;
+  if (/^(Item Class|Gegenstandsklasse|Rarity|Seltenheit|Item Level|Gegenstandsstufe|Note|Notiz|Quality|Qualität|Stack Size|Stapelgröße|Sockets|Fassungen|Requirements?|Anforderungen|Level|Str|Dex|Int|Armour|Evasion Rating|Energy Shield|Ward|Intangibility):/i.test(line)) return false;
   if (/^(Corrupted|Verderbt|Unidentified|Nicht identifiziert)$/i.test(line)) return false;
   if (influenceLine.test(line)) return false;
   if (synthesisedLine.test(line)) return false;
@@ -137,9 +158,19 @@ export function parsePoeItem(rawInput: string): ParsedItem {
   const mercenaryLevelText = valueAfterLabel(lines, ["Mercenary Level:", "Söldnerstufe:"]);
   const itemLevelText = valueAfterLabel(lines, ["Item Level:", "Gegenstandsstufe:"]);
   const qualityText = valueAfterLabel(lines, ["Quality:", "Qualität:"]);
+  const stackSizeText = valueAfterLabel(lines, ["Stack Size:", "Stapelgröße:"]);
   const socketsText = valueAfterLabel(lines, ["Sockets:", "Fassungen:"]);
   const itemLevel = itemLevelText ? Number.parseInt(itemLevelText, 10) : undefined;
   const quality = qualityText ? Number.parseInt(qualityText.replace(/[^\d-]/g, ""), 10) : undefined;
+  const stackSizeMatch = stackSizeText?.match(/^([\d.,\s]+)\s*\/\s*([\d.,\s]+)$/);
+  // The game formats large stacks with locale-specific grouping separators
+  // (for example 50,000/50,000). Stack counts are integers, so discard those
+  // separators before parsing rather than silently falling back to item search.
+  const parseStackCount = (value: string | undefined) => value
+    ? Number.parseInt(value.replace(/\D/g, ""), 10)
+    : undefined;
+  const stackSize = parseStackCount(stackSizeMatch?.[1]);
+  const maxStackSize = parseStackCount(stackSizeMatch?.[2]);
   const socketGroups = socketsText?.split(/\s+/).filter(Boolean) ?? [];
   const sockets = socketGroups.length
     ? socketGroups.reduce((total, group) => total + (group.match(/[RGBWAD]/gi)?.length ?? 0), 0)
@@ -168,7 +199,16 @@ export function parsePoeItem(rawInput: string): ParsedItem {
       headerLines.push(line);
     }
     if (headerLines.length === 1) {
-      baseType = headerLines[0];
+      const magicItemName = headerLines[0]!;
+      const extractedBaseType = rarity?.toLocaleLowerCase() === "magic"
+        ? baseTypeFromMagicName(magicItemName, lines)
+        : undefined;
+      if (extractedBaseType) {
+        name = magicItemName;
+        baseType = extractedBaseType;
+      } else {
+        baseType = magicItemName;
+      }
     } else if (headerLines.length >= 2) {
       name = headerLines[0];
       baseType = headerLines[1];
@@ -230,6 +270,8 @@ export function parsePoeItem(rawInput: string): ParsedItem {
   if (baseType) parsed.baseType = baseType;
   if (itemLevel !== undefined && Number.isFinite(itemLevel)) parsed.itemLevel = itemLevel;
   if (quality !== undefined && Number.isFinite(quality)) parsed.quality = quality;
+  if (stackSize !== undefined && Number.isFinite(stackSize)) parsed.stackSize = stackSize;
+  if (maxStackSize !== undefined && Number.isFinite(maxStackSize)) parsed.maxStackSize = maxStackSize;
   if (sockets !== undefined && sockets > 0) parsed.sockets = sockets;
   if (links !== undefined && links > 0) parsed.links = links;
   parsed.corrupted = corrupted;

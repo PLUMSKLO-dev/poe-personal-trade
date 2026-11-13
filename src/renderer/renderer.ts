@@ -33,10 +33,13 @@ const $ = <T extends HTMLElement>(id: string): T => {
 let currentItem: ParsedItem | undefined;
 let currentSearch: SearchResponse | undefined;
 let mercenaryCatalog: MercenaryCatalog | undefined;
+let currentModifierMatches: TradeStatMatch[] = [];
 let itemGeneration = 0;
 const selectedSupportIds = new Set<string>();
 const selectedStatIds = new Set<string>();
 let currentUpdateState: UpdateState = { status: "idle" };
+let searchCooldownUntil = 0;
+let searchCooldownTimer: number | undefined;
 
 function renderUpdateState(state: UpdateState): void {
   currentUpdateState = state;
@@ -65,16 +68,23 @@ function applyStaticTranslations(): void {
   document.documentElement.lang = getLanguage();
   $("hide-button").title = t("hide");
   $("quit-button").title = t("hideOverlay");
+  $("settings-button").title = t("settingsTitle");
+  $("settings-button").setAttribute("aria-label", t("settingsTitle"));
+  $("settings-heading").textContent = t("settings");
   $("intro-step-one").innerHTML = t("introOne");
   $("intro-step-two").innerHTML = t("introTwo");
   $("intro-safe").textContent = t("safe");
   $("league-label").textContent = t("league");
   $("language-label").textContent = t("language");
-  $("read-button").textContent = t("readItem");
   $("read-button").title = t("readItemTitle");
+  $("read-button").setAttribute("aria-label", t("readItemTitle"));
   $("empty-state").textContent = t("empty");
-  $("raw-item-summary").textContent = t("rawItem");
-  $("item-options-label").textContent = t("itemOptions");
+  $("raw-item-summary").title = t("rawItem");
+  $("raw-item-summary").setAttribute("aria-label", t("rawItem"));
+  $("raw-item-label").textContent = t("rawItem");
+  $("item-options-label").title = t("itemOptions");
+  $("item-options-label").setAttribute("aria-label", t("itemOptions"));
+  $("item-options-label-text").textContent = t("itemOptions");
   $("item-options-hint").textContent = t("itemOptionsHint");
   $("mod-filter-heading").textContent = t("modFilters");
   $("mods-all").textContent = t("recommended");
@@ -91,6 +101,7 @@ function applyStaticTranslations(): void {
   $("open-trade-button").textContent = t("openOfficial");
   $("footer-text").textContent = t("footer");
   renderUpdateState(currentUpdateState);
+  if (searchCooldownUntil > Date.now()) updateSearchCooldown();
 }
 
 const influenceDisplayNames: Record<ItemInfluence, string> = {
@@ -106,11 +117,64 @@ function setHidden(id: string, hidden: boolean): void {
   $(id).classList.toggle("hidden", hidden);
 }
 
+function positionItemPopover(menu: HTMLDetailsElement): void {
+  const summary = menu.querySelector("summary");
+  const popover = document.getElementById(`${menu.id}-popover`);
+  if (!summary || !popover || !menu.open) return;
+
+  // The item panel has clipped/scrolling ancestors. Render the popover at the
+  // document root so it can use the full overlay window without being cropped.
+  if (popover.parentElement !== document.body) document.body.append(popover);
+
+  const anchor = summary.getBoundingClientRect();
+  const margin = 8;
+  const desiredWidth = menu.id === "item-filter-panel" ? 470 : 460;
+  const width = Math.min(desiredWidth, window.innerWidth - margin * 2);
+  const left = Math.max(margin, Math.min(anchor.left, window.innerWidth - width - margin));
+  popover.style.width = `${Math.max(240, width)}px`;
+  popover.style.left = `${left}px`;
+  popover.style.top = `${anchor.bottom + 6}px`;
+
+  const bounds = popover.getBoundingClientRect();
+  if (bounds.bottom > window.innerHeight - margin) {
+    popover.style.top = `${Math.max(margin, window.innerHeight - bounds.height - margin)}px`;
+  }
+}
+
+function restoreItemPopover(menu: HTMLDetailsElement): void {
+  const popover = document.getElementById(`${menu.id}-popover`);
+  if (popover && popover.parentElement === document.body) menu.append(popover);
+}
+
 function setSearchStatus(message: string, tone: "idle" | "searching" | "success" | "error" = "idle"): void {
   const status = $("search-status");
   status.textContent = message;
   status.title = message;
   status.dataset.tone = tone;
+}
+
+function updateSearchCooldown(): void {
+  const remaining = Math.ceil((searchCooldownUntil - Date.now()) / 1_000);
+  const button = $("search-button") as HTMLButtonElement;
+  if (remaining <= 0) {
+    searchCooldownUntil = 0;
+    if (searchCooldownTimer !== undefined) window.clearInterval(searchCooldownTimer);
+    searchCooldownTimer = undefined;
+    button.disabled = false;
+    button.textContent = currentItem?.isMercenaryWarrant ? t("warrantPriceCheck") : t("priceCheck");
+    setSearchStatus(t("rateLimitReady"), "success");
+    return;
+  }
+  button.disabled = true;
+  button.textContent = t("rateLimitButton", { seconds: remaining });
+  setSearchStatus(t("rateLimitCountdown", { seconds: remaining }), "error");
+}
+
+function startSearchCooldown(seconds: number): void {
+  searchCooldownUntil = Date.now() + Math.max(seconds, 1) * 1_000;
+  if (searchCooldownTimer !== undefined) window.clearInterval(searchCooldownTimer);
+  updateSearchCooldown();
+  searchCooldownTimer = window.setInterval(updateSearchCooldown, 1_000);
 }
 
 function updateSelectionSummary(): void {
@@ -156,6 +220,90 @@ function formatPrice(amount: number, currency: string): string {
   return `${amount} ${names[currency] ?? currency}`;
 }
 
+function formatBulkAmount(amount: number): string {
+  return new Intl.NumberFormat(locale(), { maximumFractionDigits: 2 }).format(amount);
+}
+
+function formatBulkCurrency(currency: string): string {
+  const names: Record<string, string> = { divine: "Divine", chaos: "Chaos" };
+  return names[currency] ?? currency;
+}
+
+function formatRelativeTime(indexed?: string): string {
+  if (!indexed) return "—";
+  const timestamp = Date.parse(indexed);
+  if (!Number.isFinite(timestamp)) return indexed;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 31_536_000], ["month", 2_592_000], ["day", 86_400], ["hour", 3_600], ["minute", 60],
+  ];
+  const formatter = new Intl.RelativeTimeFormat(locale(), { numeric: "auto", style: "short" });
+  for (const [unit, unitSeconds] of units) {
+    if (seconds >= unitSeconds) return formatter.format(-Math.floor(seconds / unitSeconds), unit);
+  }
+  return formatter.format(0, "second");
+}
+
+function renderBulkListings(response: SearchResponse): string {
+  const listings = response.bulkListings ?? [];
+  if (!listings.length) {
+    return `<div class="empty-result">${escapeHtml(response.stackValue?.basisListings === 0 ? t("bulkFixedRatio") : t("bulkEmpty"))}</div>`;
+  }
+
+  const value = response.stackValue;
+  const referenceListings = value ? listings.filter((entry) => entry.exchangeCurrency === value.currency) : [];
+  const referenceAfter = Math.max(1, Math.ceil(referenceListings.length / 2));
+  let referenceCount = 0;
+  let referenceInserted = false;
+  const rows: string[] = [];
+  const referenceRow = () => `<tr class="bulk-reference-row">
+    <td>${formatBulkAmount(value!.unitPrice)}</td>
+    <td>${formatBulkAmount(value!.unitPrice)} ${escapeHtml(formatBulkCurrency(value!.currency))} / 1</td>
+    <td colspan="3">${escapeHtml(t("bulkReference"))}</td>
+  </tr>`;
+
+  for (const listing of listings) {
+    const unitPrice = listing.exchangeAmount / listing.itemAmount;
+    rows.push(`<tr>
+      <td>${formatBulkAmount(unitPrice)} ${escapeHtml(formatBulkCurrency(listing.exchangeCurrency))}</td>
+      <td>${formatBulkAmount(listing.exchangeAmount)} / ${formatBulkAmount(listing.itemAmount)}</td>
+      <td>${formatBulkAmount(listing.stock)}</td>
+      <td>${formatBulkAmount(listing.fulfill)}</td>
+      <td>${escapeHtml(formatRelativeTime(listing.indexed))}</td>
+    </tr>`);
+    if (value && listing.exchangeCurrency === value.currency) {
+      referenceCount += 1;
+      if (!referenceInserted && referenceCount >= referenceAfter) {
+        rows.push(referenceRow());
+        referenceInserted = true;
+      }
+    }
+  }
+  if (value && !referenceInserted) rows.push(referenceRow());
+
+  return `<div class="bulk-listings-scroll"><table class="bulk-listings-table">
+    <thead><tr>
+      <th>${escapeHtml(t("bulkPrice"))}</th><th>${escapeHtml(t("bulkRate"))}</th>
+      <th>${escapeHtml(t("bulkStock"))}</th><th>${escapeHtml(t("bulkFulfills"))}</th><th>${escapeHtml(t("bulkListed"))}</th>
+    </tr></thead><tbody>${rows.join("")}</tbody>
+  </table></div>`;
+}
+
+function renderStackValue(response: SearchResponse): string {
+  const value = response.stackValue;
+  if (!value) return "";
+  const currency = formatBulkCurrency(value.currency);
+  const estimateHint = value.basisListings
+    ? t("bulkEstimateHint", { count: value.basisListings, currency })
+    : t("bulkFixedRatio");
+  return `<div class="stack-value-summary">
+    <div><span>${escapeHtml(t("bulkOwnStack", { count: value.quantity }))}</span><strong>${formatBulkAmount(value.currentTotal)} ${escapeHtml(currency)}</strong></div>
+    <div><span>${escapeHtml(t("bulkUnitPrice"))}</span><strong>${formatBulkAmount(value.unitPrice)} ${escapeHtml(currency)}</strong></div>
+    <div><span>${escapeHtml(t("bulkFullStack", { count: value.maxStackSize }))}</span><strong>${formatBulkAmount(value.fullStackTotal)} ${escapeHtml(currency)}</strong></div>
+    <small>${escapeHtml(estimateHint)}</small>
+  </div>`;
+}
+
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return localizeBackendMessage(message.replace(/^Error invoking remote method '[^']+': Error:\s*/, ""));
@@ -164,6 +312,7 @@ function errorMessage(error: unknown): string {
 function localizeBackendMessage(message: string): string {
   if (getLanguage() === "de") return message;
   return message
+    .replace("PoE hat den kopierten Basistyp abgelehnt. Die Suche wurde ohne diesen einzelnen Filter wiederholt; bitte prüfe, ob die Treffer zum Item passen.", "PoE rejected the copied base type. The search was retried without this single filter; please verify that the listings match the item.")
     .replace("Der kopierte Warrant enthält keine Build-Angabe.", "The copied Warrant does not contain a build.")
     .replace(/GGG-Rate-Limit aktiv\. Bitte (\d+) Sekunden warten\./, "GGG rate limit active. Please wait $1 seconds.")
     .replace("Trade-Anfrage fehlgeschlagen", "Trade request failed")
@@ -336,6 +485,7 @@ function renderItem(item: ParsedItem): void {
   const searchButton = $("search-button") as HTMLButtonElement;
   searchButton.textContent = item.isMercenaryWarrant ? t("warrantPriceCheck") : t("priceCheck");
   setSearchStatus(item.isMercenaryWarrant ? t("selectSkills") : t("preparingItem"), "idle");
+  if (searchCooldownUntil > Date.now()) updateSearchCooldown();
   if (item.isMercenaryWarrant) void ensureMercenaryCatalog().then(renderDetectedMercenarySkills);
   if (!hasIdentity) {
     $("empty-state").textContent = item.warnings[0] ? localizeBackendMessage(item.warnings[0]) : t("empty");
@@ -347,6 +497,7 @@ function renderItem(item: ParsedItem): void {
     item.mercenaryName ?? item.baseType ?? item.itemClass,
     item.mercenaryLevel ? `Mercenary Level ${item.mercenaryLevel}` : undefined,
     item.itemLevel ? `Item Level ${item.itemLevel}` : undefined,
+    item.stackSize !== undefined ? `${t("stackSize")} ${item.stackSize}/${item.maxStackSize ?? item.stackSize}` : undefined,
     item.influences?.map((influence) => influenceDisplayNames[influence]).join(" + "),
   ].filter(Boolean).join(" · ");
   $("item-badge").textContent = item.isMercenaryWarrant ? "WARRANT" : (item.rarity ?? "ITEM").toUpperCase();
@@ -381,13 +532,17 @@ function currentStatValue(match: TradeStatMatch): string {
   return `${value}${match.label.includes("%") ? "%" : ""}`;
 }
 
-function renderModifierMatch(match: TradeStatMatch): string {
+function renderModifierMatch(match: TradeStatMatch, matchIndex = -1): string {
   const range = match.numericValue === undefined ? undefined : defaultStatRange(match);
   if (match.unmatched) {
     return `<div class="modifier-option unmatched-mod">
       <input type="checkbox" disabled />
       <span class="modifier-text"><span>${escapeHtml(match.raw)}</span><small>${t("unmatchedHint")}</small></span>
       <span class="modifier-unmatched">${t("unmatched")}</span>
+      <div class="unmatched-mapping-controls" data-match-index="${matchIndex}">
+        <button class="mini-button mapping-suggest" type="button" data-match-index="${matchIndex}">${t("learnMapping")}</button>
+        <div class="mapping-editor hidden" data-mapping-editor="${matchIndex}"></div>
+      </div>
     </div>`;
   }
 
@@ -401,7 +556,7 @@ function renderModifierMatch(match: TradeStatMatch): string {
   const title = isPseudo ? pseudoDisplayName(match) : match.raw;
   const detail = isPseudo
     ? `<span class="calculated-value">${t("calculatedValue")} <strong>${escapeHtml(currentStatValue(match))}</strong></span>`
-    : `${escapeHtml(typeLabel)} ${affix} ${roll}`;
+    : `${escapeHtml(typeLabel)} ${affix} ${roll}${match.learned ? ` <span class="learned-mapping-badge">${t("learnedMappingBadge")}</span><button class="mini-button learned-forget" type="button" data-match-index="${matchIndex}">${t("forgetMapping")}</button>` : ""}`;
   return `
     <label class="modifier-option ${isPseudo ? "pseudo-option" : "direct-option"}">
       <input type="checkbox" value="${escapeHtml(match.id)}" data-alternative-ids="${escapeHtml((match.alternativeIds ?? []).join(","))}" data-conflicts="${escapeHtml((match.conflictKeys ?? []).join(","))}" data-recommended="${match.recommended === false ? "false" : "true"}" ${match.recommended === false ? "" : "checked"} />
@@ -415,27 +570,32 @@ function renderModifierMatch(match: TradeStatMatch): string {
 
 async function loadModifierMatches(item: ParsedItem, generation: number): Promise<boolean> {
   selectedStatIds.clear();
+  currentModifierMatches = [];
   if (item.modifiers.length === 0 || item.isMercenaryWarrant) return generation === itemGeneration;
   const matches: TradeStatMatch[] = await window.poeTrade.matchItemModifiers(item);
   if (generation !== itemGeneration) return false;
-  for (const match of matches) if (!match.unmatched && match.recommended !== false) selectedStatIds.add(match.id);
-  setHidden("modifier-panel", matches.length === 0);
-  const recommended = matches.filter((match) => !match.unmatched && match.recommended !== false);
-  const additional = matches.filter((match) => match.unmatched || match.recommended === false);
+  currentModifierMatches = matches;
+  // Keep derived pseudo totals out of the simple price-check flow. Exact item
+  // modifiers stay available, avoiding a second layer of redundant filters.
+  const itemMatches = matches.filter((match) => match.kind !== "pseudo");
+  for (const match of itemMatches) if (!match.unmatched && match.recommended !== false) selectedStatIds.add(match.id);
+  setHidden("modifier-panel", itemMatches.length === 0);
+  const recommended = itemMatches.filter((match) => !match.unmatched && match.recommended !== false);
+  const additional = itemMatches.filter((match) => !match.unmatched && match.recommended === false);
+  const unmatched = matches.map((match, index) => ({ match, index })).filter(({ match }) => match.unmatched);
+  const renderCategory = (title: string, className: string, primary: TradeStatMatch[], extra: TradeStatMatch[]) => {
+    const count = primary.length + extra.length;
+    if (!count) return "";
+    return `<section class="modifier-category ${className}">
+      <div class="modifier-category-heading"><strong>${title}</strong><span>${count}</span></div>
+      ${[...primary, ...extra].map((match) => renderModifierMatch(match, currentModifierMatches.indexOf(match))).join("")}
+    </section>`;
+  };
   $("modifier-list").innerHTML = `<section class="modifier-group compact-filter-group">
     <div class="modifier-group-heading"><strong>${t("searchFilters")}</strong><span>${t("recommendedCount", { count: recommended.length })}</span></div>
-    ${recommended.map(renderModifierMatch).join("")}
-    ${additional.length ? `<button id="more-filters" class="more-filters" type="button">${t("moreFilters", { count: additional.length })}</button>
-      <div id="additional-filters" class="additional-filters hidden">${additional.map(renderModifierMatch).join("")}</div>` : ""}
+    ${renderCategory(t("itemMods"), "item-mod-category", recommended, additional)}
+    ${unmatched.length ? `<details class="unmatched-details"><summary>${t("unmatchedCount", { count: unmatched.length })}</summary><p>${t("unmatchedDescription")}</p>${unmatched.map(({ match, index }) => renderModifierMatch(match, index)).join("")}</details>` : ""}
   </section>`;
-  const moreButton = document.getElementById("more-filters") as HTMLButtonElement | null;
-  moreButton?.addEventListener("click", () => {
-    const additionalFilters = document.getElementById("additional-filters");
-    if (!additionalFilters) return;
-    const willShow = additionalFilters.classList.contains("hidden");
-    additionalFilters.classList.toggle("hidden", !willShow);
-    moreButton.textContent = willShow ? t("hideAdditional") : t("moreFilters", { count: additional.length });
-  });
   updateSelectionSummary();
   return true;
 }
@@ -476,6 +636,7 @@ function renderDetectedMercenarySkills(): void {
         <strong>${escapeHtml(skill.name)}</strong>
         ${skillEntry ? "" : `<span class="catalog-miss">${t("tradeIdMissing")}</span>`}
       </label>
+      ${supports.length ? `<div class="detected-support-heading">${t("supportsOnWarrant")} <span>${t("supportChecksNarrow")}</span></div>` : ""}
       ${supports.length ? `<div class="detected-supports">${supports.map(({ source, entry }) => `
         <label title="${escapeHtml(t("supportFor", { skill: skill.name }))}">
           <input class="detected-support-checkbox" type="checkbox" value="${escapeHtml(entry?.id ?? "")}" ${entry ? "" : "disabled"} />
@@ -487,8 +648,8 @@ function renderDetectedMercenarySkills(): void {
     <strong>${t("skillsDetected", { count: skills.length })}</strong>
     <span class="detected-block-actions">
       <span class="active-mercenary-blocks">${t("blocksActive", { count: Math.min(2, skills.length), label: getLanguage() === "de" ? (Math.min(2, skills.length) === 1 ? "Suchblock" : "Suchblöcke") : (Math.min(2, skills.length) === 1 ? "search block" : "search blocks") })}</span>
-      <button class="mini-button merc-block-all" type="button">${t("all")}</button>
-      <button class="mini-button merc-block-none" type="button">${t("none")}</button>
+      <button class="mini-button merc-block-all" type="button">${t("allSkills")}</button>
+      <button class="mini-button merc-block-none" type="button">${t("noSkills")}</button>
     </span>
   </div>
   <div class="merc-search-hint">${t("mercenarySelectionHint")}</div>
@@ -570,8 +731,12 @@ function renderResults(response: SearchResponse): void {
   const tradeButton = $("open-trade-button") as HTMLButtonElement;
   tradeButton.textContent = t("fullOfficial");
   tradeButton.title = t("fullOfficialTitle");
-  $("result-summary").textContent = t("resultsSummary", { total: response.total.toLocaleString(locale()), loaded: response.results.length });
-  $("results").innerHTML = response.results.length === 0
+  $("result-summary").textContent = response.bulkListings
+    ? t("bulkResultsSummary", { total: response.total.toLocaleString(locale()), loaded: response.bulkListings.length })
+    : t("resultsSummary", { total: response.total.toLocaleString(locale()), loaded: response.results.length });
+  $("results").innerHTML = response.bulkListings
+    ? `${renderBulkListings(response)}${renderStackValue(response)}`
+    : response.results.length === 0
     ? `<div class="empty-result">${t("noListings")}</div>`
     : response.results.map((result) => `
       <article class="result-card">
@@ -600,6 +765,10 @@ async function runSearch(generation = itemGeneration): Promise<void> {
   const button = $("search-button") as HTMLButtonElement;
   const normalLabel = item.isMercenaryWarrant ? t("warrantPriceCheck") : t("priceCheck");
   const mercenaryFilters = selectedMercenaryFilters();
+  if (searchCooldownUntil > Date.now()) {
+    updateSearchCooldown();
+    return;
+  }
   if (item.isMercenaryWarrant && mercenaryFilters.length === 0) {
     setSearchStatus(t("requireSkill"), "error");
     return;
@@ -623,11 +792,17 @@ async function runSearch(generation = itemGeneration): Promise<void> {
       : t("completed")), "success");
   } catch (error) {
     if (generation !== itemGeneration) return;
-    setSearchStatus(errorMessage(error), "error");
+    const message = errorMessage(error);
+    const retrySeconds = message.match(/(?:Please wait|Bitte)\s+(\d+)\s+(?:seconds?|Sekunden)/i)?.[1];
+    if (retrySeconds) startSearchCooldown(Number(retrySeconds));
+    else setSearchStatus(message, "error");
   } finally {
     if (generation === itemGeneration) {
-      button.disabled = false;
-      button.textContent = normalLabel;
+      if (searchCooldownUntil > Date.now()) updateSearchCooldown();
+      else {
+        button.disabled = false;
+        button.textContent = normalLabel;
+      }
     }
   }
 }
@@ -672,11 +847,140 @@ function saveCurrentSettings(): void {
   void window.poeTrade.saveSettings({ league, hotkey: "Alt+D", language: getLanguage() });
 }
 
+async function findUnmatchedModifierMapping(button: HTMLButtonElement): Promise<void> {
+  const index = Number(button.dataset.matchIndex);
+  const match = currentModifierMatches[index];
+  if (!match?.unmatched) return;
+  const controls = button.closest<HTMLElement>(".unmatched-mapping-controls");
+  const editor = controls?.querySelector<HTMLElement>(".mapping-editor");
+  if (!controls || !editor) return;
+
+  button.disabled = true;
+  button.textContent = t("searchingMappings");
+  editor.classList.remove("hidden");
+  editor.textContent = t("searchingMappings");
+  try {
+    const kind = match.kind && match.kind !== "pseudo" ? match.kind : "unknown";
+    const suggestions = await window.poeTrade.getTradeStatSuggestions(match.sourceLines ?? [match.raw], kind);
+    if (!suggestions.length) {
+      editor.textContent = t("noMappingSuggestions");
+      button.classList.add("hidden");
+      return;
+    }
+    const select = document.createElement("select");
+    select.className = "learned-mapping-select";
+    select.innerHTML = `<option value="">${escapeHtml(t("selectMapping"))}</option>${suggestions.map((entry) =>
+      `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.text.replace(/\n/g, " / "))}</option>`,
+    ).join("")}`;
+    const save = document.createElement("button");
+    save.className = "mini-button mapping-save";
+    save.type = "button";
+    save.dataset.matchIndex = String(index);
+    save.textContent = t("saveMapping");
+    save.disabled = true;
+    const status = document.createElement("span");
+    status.className = "mapping-status";
+    editor.replaceChildren(select, save, status);
+    button.classList.add("hidden");
+  } catch (error) {
+    editor.textContent = errorMessage(error);
+    button.disabled = false;
+    button.textContent = t("learnMapping");
+  }
+}
+
+async function saveUnmatchedModifierMapping(button: HTMLButtonElement): Promise<void> {
+  const index = Number(button.dataset.matchIndex);
+  const match = currentModifierMatches[index];
+  if (!match?.unmatched) return;
+  const editor = button.closest<HTMLElement>(".mapping-editor");
+  const select = editor?.querySelector<HTMLSelectElement>(".learned-mapping-select");
+  const status = editor?.querySelector<HTMLElement>(".mapping-status");
+  if (!editor || !select || !status || !select.value) return;
+
+  const item = currentItem;
+  const generation = itemGeneration;
+  const previouslySelected = new Set(selectedStatIds);
+  button.disabled = true;
+  status.textContent = t("savingMapping");
+  try {
+    await window.poeTrade.learnModifierMapping({
+      lines: match.sourceLines ?? [match.raw],
+      kind: match.kind && match.kind !== "pseudo" ? match.kind : "unknown",
+      tradeStatId: select.value,
+    });
+    if (!item || currentItem !== item || itemGeneration !== generation) return;
+    const learnedId = select.value;
+    if (!await loadModifierMatches(item, generation)) return;
+    selectedStatIds.clear();
+    document.querySelectorAll<HTMLInputElement>('.modifier-option input[type="checkbox"]:not(:disabled)').forEach((input) => {
+      input.checked = previouslySelected.has(input.value) || input.value === learnedId;
+      if (input.checked) selectedStatIds.add(input.value);
+    });
+    updateSelectionSummary();
+    markSearchDirty();
+  } catch (error) {
+    status.textContent = errorMessage(error);
+    button.disabled = false;
+  }
+}
+
+async function forgetLearnedModifierMapping(button: HTMLButtonElement): Promise<void> {
+  const match = currentModifierMatches[Number(button.dataset.matchIndex)];
+  if (!match?.learned || !match.kind || match.kind === "pseudo") return;
+  const item = currentItem;
+  const generation = itemGeneration;
+  const previouslySelected = new Set(selectedStatIds);
+  previouslySelected.delete(match.id);
+  button.disabled = true;
+  try {
+    await window.poeTrade.forgetModifierMapping({
+      lines: match.sourceLines ?? [match.raw],
+      kind: match.kind,
+    });
+    if (!item || currentItem !== item || itemGeneration !== generation) return;
+    if (!await loadModifierMatches(item, generation)) return;
+    selectedStatIds.clear();
+    document.querySelectorAll<HTMLInputElement>('.modifier-option input[type="checkbox"]:not(:disabled)').forEach((input) => {
+      input.checked = previouslySelected.has(input.value);
+      if (input.checked) selectedStatIds.add(input.value);
+    });
+    updateSelectionSummary();
+    markSearchDirty();
+  } catch (error) {
+    button.disabled = false;
+    button.title = errorMessage(error);
+  }
+}
+
 applyStaticTranslations();
 renderSupports();
 window.poeTrade.onHotkey((item) => void handleHotkey(item));
 window.poeTrade.onUpdateState(renderUpdateState);
 $("read-button").addEventListener("click", () => void readClipboard());
+document.addEventListener("click", (event) => {
+  const settingsMenu = $("settings-menu") as HTMLDetailsElement;
+  if (!settingsMenu.contains(event.target as Node)) settingsMenu.open = false;
+  for (const id of ["item-filter-panel", "raw-item-details"]) {
+    const menu = $(id) as HTMLDetailsElement;
+    const popover = document.getElementById(`${menu.id}-popover`);
+    if (!menu.contains(event.target as Node) && !popover?.contains(event.target as Node)) {
+      menu.open = false;
+      restoreItemPopover(menu);
+    }
+    else if (menu.open) requestAnimationFrame(() => positionItemPopover(menu));
+  }
+});
+for (const id of ["item-filter-panel", "raw-item-details"]) {
+  const menu = $(id) as HTMLDetailsElement;
+  menu.addEventListener("toggle", () => {
+    if (menu.open) requestAnimationFrame(() => positionItemPopover(menu));
+    else restoreItemPopover(menu);
+  });
+}
+window.addEventListener("resize", () => {
+  for (const id of ["item-filter-panel", "raw-item-details"]) positionItemPopover($(id) as HTMLDetailsElement);
+});
 $("search-button").addEventListener("click", () => void runSearch());
 $("hide-button").addEventListener("click", () => void window.poeTrade.hideWindow());
 $("quit-button").addEventListener("click", () => void window.poeTrade.hideWindow());
@@ -698,6 +1002,11 @@ $("support-list").addEventListener("change", (event) => {
 $("detected-mercenary-skills").addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
   if (input.type === "checkbox") {
+    if (input.classList.contains("allow-one-missing-support")) {
+      updateMercenaryBlockSummary();
+      markSearchDirty();
+      return;
+    }
     updateMercenaryBlockSummary();
     markSearchDirty();
   }
@@ -712,7 +1021,14 @@ $("detected-mercenary-skills").addEventListener("click", (event) => {
   markSearchDirty();
 });
 $("modifier-list").addEventListener("change", (event) => {
-  const input = event.target as HTMLInputElement;
+  const target = event.target as HTMLElement;
+  if (target.matches(".learned-mapping-select")) {
+    const editor = target.closest<HTMLElement>(".mapping-editor");
+    const save = editor?.querySelector<HTMLButtonElement>(".mapping-save");
+    if (save) save.disabled = !(target as HTMLSelectElement).value;
+    return;
+  }
+  const input = target as HTMLInputElement;
   if (input.type !== "checkbox") return;
   if (input.checked) {
     const conflicts = new Set((input.dataset.conflicts ?? "").split(",").filter(Boolean));
@@ -730,6 +1046,18 @@ $("modifier-list").addEventListener("change", (event) => {
   } else selectedStatIds.delete(input.value);
   markSearchDirty();
 });
+$("modifier-list").addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  const findButton = target.closest<HTMLButtonElement>(".mapping-suggest");
+  if (findButton) {
+    void findUnmatchedModifierMapping(findButton);
+    return;
+  }
+  const saveButton = target.closest<HTMLButtonElement>(".mapping-save");
+  if (saveButton) void saveUnmatchedModifierMapping(saveButton);
+  const forgetButton = target.closest<HTMLButtonElement>(".learned-forget");
+  if (forgetButton) void forgetLearnedModifierMapping(forgetButton);
+});
 $("mods-all").addEventListener("click", () => {
   document.querySelectorAll<HTMLInputElement>('.modifier-option input[type="checkbox"]:not(:disabled)').forEach((input) => {
     input.checked = input.dataset.recommended === "true";
@@ -746,7 +1074,28 @@ $("mods-none").addEventListener("click", () => {
   markSearchDirty();
 });
 $("item-filter-list").addEventListener("input", markSearchDirty);
+const leagueSelect = $("league") as HTMLSelectElement;
+let preferredLeague: string | undefined;
+let leagueRefreshPending = false;
+async function refreshLeagues(): Promise<void> {
+  if (leagueRefreshPending) return;
+  leagueRefreshPending = true;
+  try {
+    const leagues = await window.poeTrade.getLeagues();
+    if (!leagues.length) return;
+    const current = leagueSelect.value;
+    const preferred = preferredLeague ?? current;
+    const options = leagues.map((league) => `<option value="${escapeHtml(league.id)}">${escapeHtml(league.text)}</option>`).join("");
+    if (options !== leagueSelect.innerHTML) leagueSelect.innerHTML = options;
+    leagueSelect.value = leagues.some((league) => league.id === preferred) ? preferred : leagues[0]!.id;
+    if (leagueSelect.value !== current) markSearchDirty();
+  } catch { /* Keep the current list when Trade is temporarily unavailable. */ }
+  finally { leagueRefreshPending = false; }
+}
+leagueSelect.addEventListener("focus", () => void refreshLeagues());
+leagueSelect.addEventListener("pointerdown", () => void refreshLeagues());
 $("league").addEventListener("change", () => {
+  preferredLeague = leagueSelect.value;
   saveCurrentSettings();
   markSearchDirty();
 });
@@ -764,11 +1113,7 @@ void window.poeTrade.getSettings().then((settings) => {
   setLanguage(settings.language === "de" ? "de" : "en");
   ($("language") as HTMLSelectElement).value = getLanguage();
   void refreshLocalizedView();
-  const select = $("league") as HTMLSelectElement;
-  void window.poeTrade.getLeagues().then((leagues) => {
-    select.innerHTML = leagues.map((league) => `<option value="${escapeHtml(league.id)}">${escapeHtml(league.text)}</option>`).join("");
-    select.value = leagues.some((league) => league.id === settings.league) ? settings.league : (leagues[0]?.id ?? "Standard");
-  }).catch(() => {
-    select.value = settings.league;
-  });
+  preferredLeague ??= settings.league;
+  if (Array.from(leagueSelect.options).some((option) => option.value === preferredLeague)) leagueSelect.value = preferredLeague;
+  void refreshLeagues();
 });

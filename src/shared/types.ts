@@ -8,6 +8,8 @@ export interface ParsedItem {
   baseType?: string;
   itemLevel?: number;
   quality?: number;
+  stackSize?: number;
+  maxStackSize?: number;
   sockets?: number;
   links?: number;
   corrupted?: boolean;
@@ -136,6 +138,21 @@ export interface TradeStatMatch {
   better?: -1 | 0 | 1;
   conflictKeys?: string[];
   alternativeIds?: string[];
+  learned?: boolean;
+}
+
+export interface LearnedModifierMapping {
+  lines: string[];
+  kind: ModifierKind;
+  tradeStatId: string;
+  tradeStatText: string;
+  tradeStatType: string;
+}
+
+export interface TradeStatSuggestion {
+  id: string;
+  text: string;
+  type: string;
 }
 
 export interface TradePrice {
@@ -153,11 +170,33 @@ export interface TradeResult {
   skills: string[];
 }
 
+export interface BulkTradeListing {
+  id: string;
+  exchangeAmount: number;
+  exchangeCurrency: string;
+  itemAmount: number;
+  stock: number;
+  fulfill: number;
+  indexed?: string;
+}
+
+export interface StackValue {
+  quantity: number;
+  maxStackSize: number;
+  unitPrice: number;
+  currency: string;
+  currentTotal: number;
+  fullStackTotal: number;
+  basisListings: number;
+}
+
 export interface SearchResponse {
   queryId: string;
   total: number;
   tradeUrl: string;
   results: TradeResult[];
+  bulkListings?: BulkTradeListing[];
+  stackValue?: StackValue;
   notice?: string;
 }
 
@@ -185,6 +224,9 @@ export interface AppApi {
   getMercenaryCatalog(): Promise<MercenaryCatalog>;
   getLeagues(): Promise<TradeLeague[]>;
   matchItemModifiers(item: ParsedItem): Promise<TradeStatMatch[]>;
+  getTradeStatSuggestions(lines: string[], kind: ModifierKind): Promise<TradeStatSuggestion[]>;
+  learnModifierMapping(mapping: Pick<LearnedModifierMapping, "lines" | "kind" | "tradeStatId">): Promise<void>;
+  forgetModifierMapping(mapping: Pick<LearnedModifierMapping, "lines" | "kind">): Promise<void>;
   openExternal(url: string): Promise<void>;
   hideWindow(): Promise<void>;
   quitApp(): Promise<void>;
