@@ -7,6 +7,7 @@ export interface ParsedItem {
   name?: string;
   baseType?: string;
   itemLevel?: number;
+  gem?: { level?: number; locale: "en" | "de" };
   quality?: number;
   stackSize?: number;
   maxStackSize?: number;
@@ -105,6 +106,7 @@ export interface ItemSearchFilters {
   useMercenaryBuild?: boolean;
   rarity?: string;
   itemLevel?: NumericRange;
+  gemLevel?: NumericRange;
   quality?: NumericRange;
   sockets?: NumericRange;
   links?: NumericRange;

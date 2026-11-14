@@ -19,7 +19,7 @@ import type {
 } from "../shared/types";
 import { generatedStatMatchers, statDirections } from "./stat-directions.generated";
 
-const userAgent = "PoePersonalTrade/0.23.26 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
+const userAgent = "PoePersonalTrade/0.23.27 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
 
 const influenceStatIds: Record<ItemInfluence, string> = {
   shaper: "pseudo.pseudo_has_shaper_influence",
@@ -185,7 +185,37 @@ function rangeValue(range: NumericRange): { min?: number; max?: number } {
   return value;
 }
 
-export function makeQuery(request: SearchRequest): Record<string, unknown> {
+type GemTradeType = { option: string; discriminator: string };
+const germanTradeOrigin = "https://de.pathofexile.com";
+const gemCatalog = new Map<string, { expiresAt: number; entries: Map<string, string | GemTradeType> }>();
+const pendingGemCatalog = new Map<string, Promise<Map<string, string | GemTradeType>>>();
+
+async function getGemCatalog(api: string): Promise<Map<string, string | GemTradeType>> {
+  const cached = gemCatalog.get(api);
+  if (cached && cached.expiresAt > Date.now()) return cached.entries;
+  const pending = pendingGemCatalog.get(api);
+  if (pending) return pending;
+  const load = rateLimitedFetch(`${api}/data/items`).then(async (response) => {
+    const data = await response.json() as { result?: Array<{
+      id: string; entries?: Array<{ type?: string; text?: string; disc?: string }>;
+    }> };
+    const entries = new Map<string, string | GemTradeType>();
+    for (const entry of data.result?.find((group) => group.id === "gem")?.entries ?? []) {
+      if (!entry.type) continue;
+      if (entry.disc && entry.text) {
+        entries.set(normalizeExchangeName(entry.text), { option: entry.type, discriminator: entry.disc });
+      } else if (!entry.disc) {
+        entries.set(normalizeExchangeName(entry.type), entry.type);
+      }
+    }
+    if (entries.size) gemCatalog.set(api, { expiresAt: Date.now() + 10 * 60_000, entries });
+    return entries;
+  }).finally(() => { pendingGemCatalog.delete(api); });
+  pendingGemCatalog.set(api, load);
+  return load;
+}
+
+export function makeQuery(request: SearchRequest, gemType?: string | GemTradeType): Record<string, unknown> {
   const itemFilters = request.itemFilters;
   const stats: Array<Record<string, unknown>> = [];
   const mercenaryFilters = request.mercenaryFilters?.length
@@ -244,7 +274,7 @@ export function makeQuery(request: SearchRequest): Record<string, unknown> {
   }
 
   if ((itemFilters?.useBaseType ?? true) && request.item.baseType) {
-    query.type = request.item.baseType;
+    query.type = gemType ?? request.item.baseType;
   } else if (!itemFilters && request.item.itemClass) {
     query.type = request.item.itemClass;
   }
@@ -270,15 +300,20 @@ export function makeQuery(request: SearchRequest): Record<string, unknown> {
   // rarity turns otherwise valid exact-type searches into zero results.
   const incompatibleFragmentRarity = itemFilters?.rarity === "normal"
     && /^(Map Fragments|Kartenfragmente)$/i.test(request.item.itemClass ?? "");
-  if (itemFilters?.rarity && !incompatibleFragmentRarity) {
+  if (request.item.gem) typeFilterValues.category = { option: "gem" };
+  if (itemFilters?.rarity && !request.item.gem && !incompatibleFragmentRarity) {
     typeFilterValues.rarity = { option: itemFilters.rarity };
   }
   if (itemFilters?.itemLevel) typeFilterValues.ilvl = rangeValue(itemFilters.itemLevel);
-  if (itemFilters?.quality) typeFilterValues.quality = rangeValue(itemFilters.quality);
+  if (itemFilters?.quality && !request.item.gem) typeFilterValues.quality = rangeValue(itemFilters.quality);
   if (itemFilters?.sockets) typeFilterValues.sockets = rangeValue(itemFilters.sockets);
   if (itemFilters?.links) typeFilterValues.links = rangeValue(itemFilters.links);
 
   const miscFilterValues: Record<string, unknown> = {};
+  if (request.item.gem) {
+    if (itemFilters?.gemLevel) miscFilterValues.gem_level = rangeValue(itemFilters.gemLevel);
+    if (itemFilters?.quality) miscFilterValues.quality = rangeValue(itemFilters.quality);
+  }
   if (itemFilters?.corrupted !== undefined) {
     miscFilterValues.corrupted = { option: String(itemFilters.corrupted) };
   }
@@ -309,9 +344,10 @@ export function intersectResultIds(resultLists: string[][]): string[] {
   return Array.from(new Set(resultLists[0])).filter((id) => remaining.every((ids) => ids.has(id)));
 }
 
-export function makeTradeUrl(request: SearchRequest): string {
-  const query = encodeURIComponent(JSON.stringify(makeQuery(request)));
-  return `https://www.pathofexile.com/trade/search/${encodeURIComponent(request.league)}?q=${query}`;
+export function makeTradeUrl(request: SearchRequest, gemType?: string | GemTradeType): string {
+  const query = encodeURIComponent(JSON.stringify(makeQuery(request, gemType)));
+  const origin = request.item.gem?.locale === "de" ? germanTradeOrigin : "https://www.pathofexile.com";
+  return `${origin}/trade/search/${encodeURIComponent(request.league)}?q=${query}`;
 }
 
 export function makeBulkExchangeQuery(wantTag: string, haveTags = ["chaos", "divine"]): Record<string, unknown> {
@@ -482,9 +518,9 @@ async function searchBulkTrade(request: SearchRequest, exchangeTag: string): Pro
   };
 }
 
-async function requestTradeSearch(league: string, body: Record<string, unknown>): Promise<TradeSearchData> {
+async function requestTradeSearch(league: string, body: Record<string, unknown>, api = apiBase): Promise<TradeSearchData> {
   const response = await rateLimitedFetch(
-    `${apiBase}/search/${encodeURIComponent(league)}`,
+    `${api}/search/${encodeURIComponent(league)}`,
     { method: "POST", body: JSON.stringify(body) },
   );
   return (await response.json()) as TradeSearchData;
@@ -515,13 +551,13 @@ async function requestCachedWarrantSearch(
   return request;
 }
 
-async function fetchTradeResults(searchData: TradeSearchData, useWarrantCache: boolean): Promise<TradeResult[]> {
+async function fetchTradeResults(searchData: TradeSearchData, useWarrantCache: boolean, api = apiBase): Promise<TradeResult[]> {
   const ids = searchData.result.slice(0, 10);
   if (!ids.length) return [];
 
   const load = async (): Promise<TradeResult[]> => {
     const fetchResponse = await rateLimitedFetch(
-      `${apiBase}/fetch/${ids.join(",")}?query=${encodeURIComponent(searchData.id)}`,
+      `${api}/fetch/${ids.join(",")}?query=${encodeURIComponent(searchData.id)}`,
     );
     const fetchData = (await fetchResponse.json()) as { result: any[] };
     return fetchData.result.filter(Boolean).map(mapResult);
@@ -631,6 +667,10 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
     throw new Error("Ungültiger Liga-Name.");
   }
   let resolvedRequest = request;
+  const searchApi = request.item.gem?.locale === "de" ? `${germanTradeOrigin}/api/trade` : apiBase;
+  const gemType = request.item.gem && request.item.baseType && (request.itemFilters?.useBaseType ?? true)
+    ? (await getGemCatalog(searchApi)).get(normalizeExchangeName(request.item.baseType))
+    : undefined;
   const mercenaryFilters = resolvedRequest.mercenaryFilters?.length
     ? resolvedRequest.mercenaryFilters
     : resolvedRequest.mercenaryFilter ? [resolvedRequest.mercenaryFilter] : [];
@@ -677,12 +717,13 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
     partitionedSupports = blockSearch.partitioned;
   } else {
     try {
-      searchData = await requestTradeSearch(request.league, makeQuery(resolvedRequest));
+      searchData = await requestTradeSearch(request.league, makeQuery(resolvedRequest, gemType), searchApi);
     } catch (error) {
       const selectedStatCount = (request.statFilters?.length ?? request.statIds?.length ?? 0);
       const useBaseType = request.itemFilters?.useBaseType ?? true;
       if (!(error instanceof Error)
         || !/Unknown item base type/i.test(error.message)
+        || request.item.gem
         || !request.item.baseType
         || !useBaseType
         || selectedStatCount === 0) throw error;
@@ -715,7 +756,7 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
     };
   }
 
-  const results = await fetchTradeResults(searchData, request.item.isMercenaryWarrant);
+  const results = await fetchTradeResults(searchData, request.item.isMercenaryWarrant, searchApi);
   const searchNotice = intersectionNotice
     ? `${intersectionNotice}${partitionedSupports ? " Komplexe Support-Blöcke wurden automatisch aufgeteilt." : ""} Maximal zehn sichtbare Vergleichsangebote werden geladen.`
     : partitionedSupports
@@ -728,7 +769,7 @@ export async function searchTrade(request: SearchRequest): Promise<SearchRespons
   return {
     queryId: searchData.id,
     total: searchData.total,
-    tradeUrl: makeTradeUrl(resolvedRequest),
+    tradeUrl: makeTradeUrl(resolvedRequest, gemType),
     results,
     notice: request.item.isMercenaryWarrant
       ? `${searchNotice} Identische Warrant-Abfragen werden fünf Minuten lang nur im Arbeitsspeicher wiederverwendet.`

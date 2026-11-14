@@ -154,6 +154,10 @@ export function parsePoeItem(rawInput: string): ParsedItem {
 
   const itemClass = valueAfterLabel(lines, ["Item Class:", "Gegenstandsklasse:"]);
   const rarity = valueAfterLabel(lines, ["Rarity:", "Seltenheit:"]);
+  const gem = /^(Gem|Skill Gem|Support Gem|Gemme|Fertigkeitsgemme|Unterstützungsgemme)$/i.test(rarity ?? "")
+    || /^(?:(?:Skill|Support) Gems|Fertigkeitsgemmen|Unterstützungsgemmen)$/i.test(itemClass ?? "");
+  const gemLevelText = gem ? valueAfterLabel(lines, ["Level:", "Stufe:"]) : undefined;
+  const gemLevel = gemLevelText ? Number.parseInt(gemLevelText, 10) : undefined;
   const build = valueAfterLabel(lines, ["Build:"]);
   const mercenaryLevelText = valueAfterLabel(lines, ["Mercenary Level:", "Söldnerstufe:"]);
   const itemLevelText = valueAfterLabel(lines, ["Item Level:", "Gegenstandsstufe:"]);
@@ -211,7 +215,8 @@ export function parsePoeItem(rawInput: string): ParsedItem {
       }
     } else if (headerLines.length >= 2) {
       name = headerLines[0];
-      baseType = headerLines[1];
+      baseType = gem ? headerLines[0] : headerLines[1];
+      if (gem) name = undefined;
     }
   }
   const synthesisedBaseMatch = /^(?:Synthesised|Synthesized)\s+(.+)$/i.exec(baseType ?? "");
@@ -254,7 +259,7 @@ export function parsePoeItem(rawInput: string): ParsedItem {
   const modifierLines = itemLevelIndex >= 0 && separatorAfterItemLevel >= 0
     ? lines.slice(separatorAfterItemLevel + 1)
     : lines;
-  const modifierBlocks = parseModifierBlocks(modifierLines, name, baseType);
+  const modifierBlocks = gem ? [] : parseModifierBlocks(modifierLines, name, baseType);
   const modifiers = modifierBlocks.flatMap((block) => block.lines);
 
   const parsed: ParsedItem = {
@@ -269,6 +274,10 @@ export function parsePoeItem(rawInput: string): ParsedItem {
   if (name) parsed.name = name;
   if (baseType) parsed.baseType = baseType;
   if (itemLevel !== undefined && Number.isFinite(itemLevel)) parsed.itemLevel = itemLevel;
+  if (gem) parsed.gem = {
+    locale: lines.some((line) => /^Gegenstandsklasse:/i.test(line)) ? "de" : "en",
+    ...(gemLevel !== undefined && Number.isFinite(gemLevel) ? { level: gemLevel } : {}),
+  };
   if (quality !== undefined && Number.isFinite(quality)) parsed.quality = quality;
   if (stackSize !== undefined && Number.isFinite(stackSize)) parsed.stackSize = stackSize;
   if (maxStackSize !== undefined && Number.isFinite(maxStackSize)) parsed.maxStackSize = maxStackSize;

@@ -373,13 +373,13 @@ function rarityTradeValue(rarity: string | undefined): string | undefined {
   return rarity ? values[rarity.toLocaleLowerCase()] : undefined;
 }
 
-function rangeFilterRow(key: string, label: string, value: number, checked: boolean): string {
+function rangeFilterRow(key: string, label: string, value: number, checked: boolean, exact = false): string {
   return `<label class="item-filter-row" data-item-filter="${key}">
     <input type="checkbox" ${checked ? "checked" : ""} />
     <span>${escapeHtml(label)}</span>
     <span class="item-filter-controls range-controls">
       <span>Min</span><input type="number" step="any" data-bound="min" value="${value}" />
-      <span>Max</span><input type="number" step="any" data-bound="max" placeholder="∞" />
+      <span>Max</span><input type="number" step="any" data-bound="max" placeholder="∞" ${exact ? `value="${value}"` : ""} />
     </span>
   </label>`;
 }
@@ -397,12 +397,12 @@ function renderItemFilters(item: ParsedItem): void {
   }
   if (item.baseType) {
     rows.push(`<label class="item-filter-row" data-item-filter="baseType">
-      <input type="checkbox" checked /><span>${t("baseType")}</span>
+      <input type="checkbox" checked /><span>${t(item.gem ? "gemName" : "baseType")}</span>
       <span class="item-filter-value">${escapeHtml(item.baseType)}</span>
     </label>`);
   }
   const rarity = rarityTradeValue(item.rarity);
-  if (rarity) {
+  if (rarity && !item.gem) {
     const checked = !(rarity === "normal" && /^(Map Fragments|Kartenfragmente)$/i.test(item.itemClass ?? ""));
     rows.push(`<label class="item-filter-row" data-item-filter="rarity">
       <input type="checkbox" ${checked ? "checked" : ""} /><span>${t("rarity")}</span>
@@ -420,12 +420,13 @@ function renderItemFilters(item: ParsedItem): void {
       <span class="item-filter-value">${influenceDisplayNames[influence]}</span>
     </label>`);
   }
-  if (item.itemLevel !== undefined) rows.push(rangeFilterRow("itemLevel", t("itemLevel"), item.itemLevel, false));
-  if (item.quality !== undefined) rows.push(rangeFilterRow("quality", t("quality"), item.quality, item.quality >= 20));
+  if (item.itemLevel !== undefined && !item.gem) rows.push(rangeFilterRow("itemLevel", t("itemLevel"), item.itemLevel, false));
+  if (item.gem?.level !== undefined) rows.push(rangeFilterRow("gemLevel", t("gemLevel"), item.gem.level, true, true));
+  if (item.quality !== undefined || item.gem) rows.push(rangeFilterRow("quality", t("quality"), item.quality ?? 0, Boolean(item.gem) || (item.quality ?? 0) >= 20, Boolean(item.gem)));
   if (item.sockets !== undefined) rows.push(rangeFilterRow("sockets", t("sockets"), item.sockets, false));
   if (item.links !== undefined) rows.push(rangeFilterRow("links", t("links"), item.links, item.links >= 5));
   rows.push(`<label class="item-filter-row" data-item-filter="corrupted">
-    <input type="checkbox" ${item.corrupted ? "checked" : ""} /><span>Corrupted</span>
+    <input type="checkbox" ${item.corrupted || item.gem ? "checked" : ""} /><span>Corrupted</span>
     <select><option value="false" ${item.corrupted ? "" : "selected"}>${t("no")}</option><option value="true" ${item.corrupted ? "selected" : ""}>${t("yes")}</option></select>
   </label>`);
   if (/^Foulborn\s+/i.test(item.name ?? "")) {
@@ -453,6 +454,7 @@ function selectedItemFilters(): ItemSearchFilters {
   const rarity = row("rarity")?.querySelector<HTMLSelectElement>("select")?.value;
   if (enabled("rarity") && rarity) filters.rarity = rarity;
   const itemLevel = range("itemLevel"); if (itemLevel) filters.itemLevel = itemLevel;
+  const gemLevel = range("gemLevel"); if (gemLevel) filters.gemLevel = gemLevel;
   const quality = range("quality"); if (quality) filters.quality = quality;
   const sockets = range("sockets"); if (sockets) filters.sockets = sockets;
   const links = range("links"); if (links) filters.links = links;
@@ -496,7 +498,7 @@ function renderItem(item: ParsedItem): void {
   $("item-meta").textContent = [
     item.mercenaryName ?? item.baseType ?? item.itemClass,
     item.mercenaryLevel ? `Mercenary Level ${item.mercenaryLevel}` : undefined,
-    item.itemLevel ? `Item Level ${item.itemLevel}` : undefined,
+    item.gem?.level !== undefined ? `${t("gemLevel")} ${item.gem.level}` : item.itemLevel ? `Item Level ${item.itemLevel}` : undefined,
     item.stackSize !== undefined ? `${t("stackSize")} ${item.stackSize}/${item.maxStackSize ?? item.stackSize}` : undefined,
     item.influences?.map((influence) => influenceDisplayNames[influence]).join(" + "),
   ].filter(Boolean).join(" · ");
