@@ -19,7 +19,7 @@ import type {
 } from "../shared/types";
 import { generatedStatMatchers, statDirections } from "./stat-directions.generated";
 
-const userAgent = "PoePersonalTrade/0.23.27 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
+const userAgent = "PoePersonalTrade/0.23.29 (https://github.com/PLUMSKLO-dev/poe-personal-trade)";
 
 const influenceStatIds: Record<ItemInfluence, string> = {
   shaper: "pseudo.pseudo_has_shaper_influence",
@@ -946,6 +946,7 @@ function matchBlock(
   block: ParsedModifierBlock,
   entries: Array<{ id: string; text: string; type: string }>,
   learnedMappings: Map<string, LearnedModifierMapping> = new Map(),
+  allowWeaponStatAlternatives = false,
 ): { entry: { id: string; text: string; type: string }; numericValue?: number; alternativeIds?: string[]; better?: -1 | 0 | 1; learned?: true } | undefined {
   const normalizedLines = block.lines.map(normalizeModifierText);
   const textVariants = [
@@ -961,6 +962,7 @@ function matchBlock(
   // that prevented an exact official-template match in the first place.
   const appliesLearnedMapping = Boolean(learnedMapping);
   let generated: typeof generatedStatMatchers[number] | undefined;
+  let equivalentWeaponMatchers: typeof generatedStatMatchers = [];
   if (!appliesLearnedMapping) {
     // Generated matcher data is several megabytes. Index it once by the shape
     // that can be known without regex work, then test only candidates with the
@@ -977,14 +979,22 @@ function matchBlock(
         }
       }
     }
-    generated = Array.from(candidateByIndex.entries())
+    const matching = Array.from(candidateByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, matcher]) => matcher)
-      .find((matcher) => textVariants.some((text) => generatedMatcherPattern(matcher).test(text)));
+      .filter((matcher) => textVariants.some((text) => generatedMatcherPattern(matcher).test(text)));
+    generated = matching[0];
+    // Weapon tooltips don't distinguish local from global in these two lines.
+    // Trade does, so preserve both IDs as alternatives for the same checkbox.
+    if (allowWeaponStatAlternatives && generated
+      && ["#% increased Attack Speed", "# to Accuracy Rating"].includes(generated.template)) {
+      equivalentWeaponMatchers = matching.filter((matcher) => matcher.template === generated!.template);
+    }
   }
   const generatedKind = generated && kindOrder.find((kind) => generated.tradeIds[kind]?.length);
   const generatedIds = generated && generatedKind
-    ? generated.tradeIds[generatedKind]!.map(stripTradeIdPrefix)
+    ? [...new Set((equivalentWeaponMatchers.length ? equivalentWeaponMatchers : [generated])
+      .flatMap((matcher) => matcher.tradeIds[generatedKind] ?? []).map(stripTradeIdPrefix))]
     : [];
   const candidates = entries.filter((entry) => lineCounts.has(entry.text.split("\n").length));
   const entry = appliesLearnedMapping && learnedMapping
@@ -1115,15 +1125,16 @@ function createPseudoMatches(
 function matchModifierBlocks(
   blocks: ParsedModifierBlock[],
   searchableEntries: Array<{ id: string; text: string; type: string }>,
-  recommendAll: boolean,
+  isUnique: boolean,
   learnedMappings: Map<string, LearnedModifierMapping>,
+  isWeapon: boolean,
 ): TradeStatMatch[] {
   const direct: TradeStatMatch[] = [];
   const consumed = new Set<number>();
   for (const [index, originalBlock] of blocks.slice(0, 80).entries()) {
     if (consumed.has(index)) continue;
     let block = originalBlock;
-    let matched = matchBlock(block, searchableEntries, learnedMappings);
+    let matched = matchBlock(block, searchableEntries, learnedMappings, isWeapon);
     if (!matched && block.lines.length === 1) {
       for (let count = 2; count <= 3 && index + count <= blocks.length; count += 1) {
         const group = blocks.slice(index, index + count);
@@ -1172,7 +1183,7 @@ function matchModifierBlocks(
       better: matched.better ?? statDirections[matched.entry.id]?.better ?? 1,
       ...(matched.alternativeIds?.length ? { alternativeIds: matched.alternativeIds } : {}),
       ...(matched.learned ? { learned: true } : {}),
-      recommended: recommendAll || /Movement Speed/i.test(matched.entry.text),
+      recommended: !isUnique && /Movement Speed/i.test(matched.entry.text),
     });
   }
   return direct;
@@ -1187,8 +1198,9 @@ export async function matchItemModifiers(item: ParsedItem | string[], learnedMap
     : item.modifierBlocks;
   let searchableEntries: Array<{ id: string; text: string; type: string }> = [];
   let blocks = sourceBlocks.flatMap((block) => splitBundledModifier(block, searchableEntries));
-  const recommendAll = !Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique";
-  let direct = matchModifierBlocks(blocks, searchableEntries, recommendAll, learnedByKey);
+  const isUnique = !Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique";
+  const isWeapon = !Array.isArray(item) && /^(Bows|Claws|Daggers|Rune Daggers|Wands|Staves|Warstaves|Sceptres|(?:One|Two) Hand (?:Axes|Maces|Swords)|Thrusting One Hand Swords)$/i.test(item.itemClass ?? "");
+  let direct = matchModifierBlocks(blocks, searchableEntries, isUnique, learnedByKey, isWeapon);
 
   // Most current stats resolve from the bundled Awakened stat catalog. Fetch
   // GGG's live stat list only when that local catalog cannot map a modifier.
@@ -1198,16 +1210,12 @@ export async function matchItemModifiers(item: ParsedItem | string[], learnedMap
     );
     searchableEntries = entries.filter((entry) => entry.type !== "pseudo");
     blocks = sourceBlocks.flatMap((block) => splitBundledModifier(block, searchableEntries));
-    direct = matchModifierBlocks(blocks, searchableEntries, recommendAll, learnedByKey);
+    direct = matchModifierBlocks(blocks, searchableEntries, isUnique, learnedByKey, isWeapon);
   }
   const entries = searchableEntries;
   const pseudos = createPseudoMatches(blocks, entries);
-  if (!Array.isArray(item) && item.rarity?.toLocaleLowerCase() === "unique") {
+  if (isUnique) {
     for (const pseudo of pseudos) pseudo.recommended = false;
-    const comparable = direct.filter((match) => !match.unmatched);
-    // Unique modifiers define the exact variant (especially Watcher's Eye and
-    // Foulborn items), so keep every successfully mapped mod visible/selectable.
-    for (const match of comparable) match.recommended = true;
   }
   return [...pseudos, ...direct];
 }

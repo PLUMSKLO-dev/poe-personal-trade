@@ -690,6 +690,51 @@ Linked Targets always count as in range of Non-Curse Auras from your Skills / No
     }]);
   });
 
+  it("keeps Silverbranch rolls opt-in while retaining the exact unique identity in the default search", async () => {
+    const item = parsePoeItem(`Item Class: Bows
+Rarity: Unique
+Silverbranch
+Crude Bow
+--------
+Item Level: 61
+--------
+99(80-100)% increased Physical Damage
++30 to Accuracy Rating
+10% increased Attack Speed
++1 to Level of Socketed Bow Gems
+Gain 10 Mana per Enemy Killed`);
+    const matches = (await matchItemModifiers(item)).filter((match) => match.kind !== "pseudo" && !match.unmatched);
+    expect(matches).toHaveLength(5);
+    expect(matches.every((match) => match.recommended === false)).toBe(true);
+    const accuracy = matches.find((match) => match.raw.includes("Accuracy"))!;
+    const speed = matches.find((match) => match.raw.includes("Attack Speed"))!;
+    expect([accuracy.id, ...accuracy.alternativeIds ?? []]).toEqual([
+      "explicit.stat_803737631", "explicit.stat_691932474",
+    ]);
+    expect([speed.id, ...speed.alternativeIds ?? []]).toEqual([
+      "explicit.stat_681332047", "explicit.stat_210067635",
+    ]);
+    const request = { league: "Covens", item, itemFilters: { useName: true, useBaseType: true, rarity: "unique" } };
+    expect(makeQuery(request)).toMatchObject({ query: {
+      name: "Silverbranch", type: "Crude Bow", stats: [{ type: "and", filters: [] }],
+    } });
+    expect(makeQuery({ ...request, statFilters: [{ id: matches[0]!.id, min: 89 }] })).toMatchObject({
+      query: { stats: [{ type: "and", filters: [{ id: matches[0]!.id, value: { min: 89 } }] }] },
+    });
+    const statFilters = matches.map((match) => ({
+      id: match.id, alternativeIds: match.alternativeIds, min: Math.floor(match.numericValue! * 0.9),
+    }));
+    expect(makeQuery({ ...request, statFilters })).toMatchObject({ query: { stats: [
+      { type: "and", filters: expect.arrayContaining([expect.objectContaining({ id: "explicit.stat_2027269580" })]) },
+      { type: "count", value: { min: 1 }, filters: [
+        { id: accuracy.id, value: { min: 27 } }, { id: accuracy.alternativeIds![0], value: { min: 27 } },
+      ] },
+      { type: "count", value: { min: 1 }, filters: [
+        { id: speed.id, value: { min: 9 } }, { id: speed.alternativeIds![0], value: { min: 9 } },
+      ] },
+    ] } });
+  });
+
   it("separates a Watcher's Eye stat from reminder, flavour and help text", () => {
     const raw = readFileSync(join(__dirname, "fixtures", "hovered-watchers-eye.txt"), "utf8");
     const item = parsePoeItem(raw);
